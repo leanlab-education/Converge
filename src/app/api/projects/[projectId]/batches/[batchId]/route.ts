@@ -1,6 +1,11 @@
 import { auth } from '@/lib/auth'
 import { canAdminProject } from '@/lib/authorization'
+import { assignBatchSlots } from '@/lib/batch-slots'
 import { prisma } from '@/lib/db'
+import {
+  syncBatchAssignmentsForRelease,
+  syncBatchStatus,
+} from '@/lib/team-batch-releases'
 import { NextRequest, NextResponse } from 'next/server'
 
 export async function PATCH(
@@ -18,19 +23,26 @@ export async function PATCH(
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
   const body = await request.json()
-  const { status, adjudicatorId, isHidden } = body as {
+  const { status, adjudicatorId, isHidden, type, isDoubleScored } = body as {
     status?: string
     adjudicatorId?: string | null
     isHidden?: boolean
+    type?: 'REGULAR' | 'TRAINING'
+    isDoubleScored?: boolean
   }
 
   if (
     status === undefined &&
     adjudicatorId === undefined &&
-    isHidden === undefined
+    isHidden === undefined &&
+    type === undefined &&
+    isDoubleScored === undefined
   ) {
     return NextResponse.json(
-      { error: 'status, adjudicatorId, or isHidden is required' },
+      {
+        error:
+          'status, adjudicatorId, isHidden, type, or isDoubleScored is required',
+      },
       { status: 400 }
     )
   }
@@ -47,11 +59,44 @@ export async function PATCH(
 
   const batch = await prisma.batch.findUnique({
     where: { id: batchId },
-    select: { status: true, projectId: true },
+    select: {
+      id: true,
+      status: true,
+      projectId: true,
+      type: true,
+      isDoubleScored: true,
+      teamReleases: { select: { id: true } },
+    },
   })
 
   if (!batch || batch.projectId !== projectId) {
     return NextResponse.json({ error: 'Batch not found' }, { status: 404 })
+  }
+
+  if (type !== undefined && type !== 'REGULAR' && type !== 'TRAINING') {
+    return NextResponse.json({ error: 'Invalid batch type' }, { status: 400 })
+  }
+
+  const nextType = type ?? batch.type
+  const nextIsDoubleScored =
+    nextType === 'TRAINING' ? false : (isDoubleScored ?? batch.isDoubleScored)
+
+  const modeIsChanging =
+    nextType !== batch.type || nextIsDoubleScored !== batch.isDoubleScored
+
+  if (modeIsChanging) {
+    const scoreCount = await prisma.score.count({
+      where: {
+        feedbackItem: { batchId },
+      },
+    })
+
+    if (scoreCount > 0) {
+      return NextResponse.json(
+        { error: 'Cannot change batch mode after scoring has begun' },
+        { status: 400 }
+      )
+    }
   }
 
   // Validate adjudicator exists and (if non-null) is a real user in this project
@@ -73,8 +118,31 @@ export async function PATCH(
     data: {
       ...(adjudicatorId !== undefined ? { adjudicatorId } : {}),
       ...(isHidden !== undefined ? { isHidden } : {}),
+      ...(modeIsChanging
+        ? {
+            type: nextType,
+            isDoubleScored: nextIsDoubleScored,
+            ...(nextType === 'TRAINING' ? { adjudicatorId: null } : {}),
+          }
+        : {}),
     },
   })
+
+  if (modeIsChanging) {
+    if (nextType === 'REGULAR' && !nextIsDoubleScored) {
+      await assignBatchSlots(batchId)
+    } else {
+      await prisma.feedbackItem.updateMany({
+        where: { batchId },
+        data: { slotIndex: null },
+      })
+    }
+
+    for (const release of batch.teamReleases) {
+      await syncBatchAssignmentsForRelease(release.id)
+    }
+    await syncBatchStatus(batchId)
+  }
 
   return NextResponse.json(updated)
 }

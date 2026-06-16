@@ -162,6 +162,46 @@ export function BatchCreator({
     }
   }
 
+  async function handleBatchModeChange(
+    batchId: string,
+    mode: 'TRAINING' | 'REGULAR_DOUBLE' | 'REGULAR_SINGLE'
+  ) {
+    const previousBatches = localBatches
+    const patch =
+      mode === 'TRAINING'
+        ? { type: 'TRAINING' as const, isDoubleScored: false }
+        : {
+            type: 'REGULAR' as const,
+            isDoubleScored: mode === 'REGULAR_DOUBLE',
+          }
+
+    setLocalBatches((current) =>
+      current.map((batch) =>
+        batch.id === batchId ? { ...batch, ...patch } : batch
+      )
+    )
+
+    try {
+      const response = await fetch(`/api/projects/${projectId}/batches/${batchId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      })
+
+      if (response.ok) {
+        await onBatchesChange({ silent: true })
+      } else {
+        const payload = await response.json().catch(() => null)
+        setLocalBatches(previousBatches)
+        alert(payload?.error || 'Failed to update batch mode')
+      }
+    } catch (error) {
+      setLocalBatches(previousBatches)
+      console.error('Failed to update batch mode:', error)
+      alert('Something went wrong while updating the batch mode.')
+    }
+  }
+
   async function handleDeleteBatch(batchId: string) {
     if (!confirm('Delete this batch? Items will return to the unbatched pool.')) return
     try {
@@ -315,7 +355,14 @@ export function BatchCreator({
             const irrSummary = batch.irrSummary
             const avgIrr = irrSummary?.averageAgreementPct ?? null
             const lowIrr = irrSummary?.lowestAgreementPct ?? null
-            const hasIrr = (irrSummary?.applicableTeamCount ?? 0) > 0
+            const isIrrEligible = batch.type === 'REGULAR' && batch.isDoubleScored
+            const hasIrr = isIrrEligible && (irrSummary?.applicableTeamCount ?? 0) > 0
+            const batchModeValue =
+              batch.type === 'TRAINING'
+                ? 'TRAINING'
+                : batch.isDoubleScored
+                  ? 'REGULAR_DOUBLE'
+                  : 'REGULAR_SINGLE'
 
             return (
               <div
@@ -392,6 +439,39 @@ export function BatchCreator({
                 {/* Expanded content */}
                 {isExpanded && (
                   <div className="space-y-3 border-t border-border/50 bg-muted/20 px-4 py-3">
+                    <div className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-background px-3 py-2.5">
+                      <div className="min-w-0">
+                        <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                          Batch mode
+                        </p>
+                        <p className="text-[11px] text-muted-foreground">
+                          Editable until scoring starts.
+                        </p>
+                      </div>
+                      <select
+                        className="h-8 rounded-lg border border-border/70 bg-background px-2 text-xs transition-all duration-200 hover:border-border"
+                        value={batchModeValue}
+                        onChange={(event) =>
+                          handleBatchModeChange(
+                            batch.id,
+                            event.target.value as
+                              | 'TRAINING'
+                              | 'REGULAR_DOUBLE'
+                              | 'REGULAR_SINGLE'
+                          )
+                        }
+                      >
+                        <option value="TRAINING">Training</option>
+                        <option value="REGULAR_DOUBLE">Double-scored</option>
+                        <option value="REGULAR_SINGLE">Single-scored</option>
+                      </select>
+                      {!isIrrEligible && (
+                        <span className="text-[11px] text-muted-foreground">
+                          IRR only applies to double-scored batches.
+                        </span>
+                      )}
+                    </div>
+
                     {/* Batch-level IRR breakdown by criterion */}
                     {hasIrr && (irrSummary?.perDimension.length ?? 0) > 0 && (
                       <div className="rounded-xl border border-border bg-background px-3 py-2.5">

@@ -137,7 +137,8 @@ export async function GET(
         }
       >()
       if (
-        (batch.type === 'TRAINING' || batch.isDoubleScored) &&
+        batch.type === 'REGULAR' &&
+        batch.isDoubleScored &&
         (batch.status === 'SCORING' ||
           batch.status === 'RECONCILING' ||
           batch.status === 'COMPLETE')

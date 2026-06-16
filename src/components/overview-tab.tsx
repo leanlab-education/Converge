@@ -45,6 +45,8 @@ interface BatchRow {
   activityId: string | null
   status: string
   progressPct: number
+  type: string
+  isDoubleScored: boolean
   irrSummary?: IrrSummary | null
 }
 
@@ -177,6 +179,8 @@ export function OverviewTab({
 
   const lowIrrBatches = batches.filter(b =>
     b.status === 'RECONCILING' &&
+    b.type === 'REGULAR' &&
+    b.isDoubleScored &&
     b.irrSummary?.averageAgreementPct != null &&
     b.irrSummary.averageAgreementPct < 80
   )
