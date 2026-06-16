@@ -162,7 +162,7 @@ export function BatchCreator({
     }
   }
 
-  async function handleBatchModeChange(
+  async function handleBatchTypeChange(
     batchId: string,
     mode: 'TRAINING' | 'REGULAR_DOUBLE' | 'REGULAR_SINGLE'
   ) {
@@ -193,12 +193,12 @@ export function BatchCreator({
       } else {
         const payload = await response.json().catch(() => null)
         setLocalBatches(previousBatches)
-        alert(payload?.error || 'Failed to update batch mode')
+        alert(payload?.error || 'Failed to update batch type')
       }
     } catch (error) {
       setLocalBatches(previousBatches)
-      console.error('Failed to update batch mode:', error)
-      alert('Something went wrong while updating the batch mode.')
+      console.error('Failed to update batch type:', error)
+      alert('Something went wrong while updating the batch type.')
     }
   }
 
@@ -442,7 +442,7 @@ export function BatchCreator({
                     <div className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-background px-3 py-2.5">
                       <div className="min-w-0">
                         <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                          Batch mode
+                          Batch Type
                         </p>
                         <p className="text-[11px] text-muted-foreground">
                           Editable until scoring starts.
@@ -452,7 +452,7 @@ export function BatchCreator({
                         className="h-8 rounded-lg border border-border/70 bg-background px-2 text-xs transition-all duration-200 hover:border-border"
                         value={batchModeValue}
                         onChange={(event) =>
-                          handleBatchModeChange(
+                          handleBatchTypeChange(
                             batch.id,
                             event.target.value as
                               | 'TRAINING'

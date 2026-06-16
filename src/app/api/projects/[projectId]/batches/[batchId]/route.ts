@@ -93,7 +93,7 @@ export async function PATCH(
 
     if (scoreCount > 0) {
       return NextResponse.json(
-        { error: 'Cannot change batch mode after scoring has begun' },
+        { error: 'Cannot change batch type after scoring has begun' },
         { status: 400 }
       )
     }
