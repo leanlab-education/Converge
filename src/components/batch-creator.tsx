@@ -66,6 +66,7 @@ interface BatchRow {
   } | null
   type: string
   isDoubleScored: boolean
+  canEditBatchType?: boolean
   adjudicatorId?: string | null
   isHidden?: boolean
   ranges: BatchRangeRow[]
@@ -439,38 +440,40 @@ export function BatchCreator({
                 {/* Expanded content */}
                 {isExpanded && (
                   <div className="space-y-3 border-t border-border/50 bg-muted/20 px-4 py-3">
-                    <div className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-background px-3 py-2.5">
-                      <div className="min-w-0">
-                        <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                          Batch Type
-                        </p>
-                        <p className="text-[11px] text-muted-foreground">
-                          Editable until scoring starts.
-                        </p>
+                    {batch.canEditBatchType && (
+                      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-background px-3 py-2.5">
+                        <div className="min-w-0">
+                          <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                            Batch Type
+                          </p>
+                          <p className="text-[11px] text-muted-foreground">
+                            Editable until scoring starts.
+                          </p>
+                        </div>
+                        <select
+                          className="h-8 rounded-lg border border-border/70 bg-background px-2 text-xs transition-all duration-200 hover:border-border"
+                          value={batchModeValue}
+                          onChange={(event) =>
+                            handleBatchTypeChange(
+                              batch.id,
+                              event.target.value as
+                                | 'TRAINING'
+                                | 'REGULAR_DOUBLE'
+                                | 'REGULAR_SINGLE'
+                            )
+                          }
+                        >
+                          <option value="TRAINING">Training</option>
+                          <option value="REGULAR_DOUBLE">Double-scored</option>
+                          <option value="REGULAR_SINGLE">Single-scored</option>
+                        </select>
+                        {!isIrrEligible && (
+                          <span className="text-[11px] text-muted-foreground">
+                            IRR only applies to double-scored batches.
+                          </span>
+                        )}
                       </div>
-                      <select
-                        className="h-8 rounded-lg border border-border/70 bg-background px-2 text-xs transition-all duration-200 hover:border-border"
-                        value={batchModeValue}
-                        onChange={(event) =>
-                          handleBatchTypeChange(
-                            batch.id,
-                            event.target.value as
-                              | 'TRAINING'
-                              | 'REGULAR_DOUBLE'
-                              | 'REGULAR_SINGLE'
-                          )
-                        }
-                      >
-                        <option value="TRAINING">Training</option>
-                        <option value="REGULAR_DOUBLE">Double-scored</option>
-                        <option value="REGULAR_SINGLE">Single-scored</option>
-                      </select>
-                      {!isIrrEligible && (
-                        <span className="text-[11px] text-muted-foreground">
-                          IRR only applies to double-scored batches.
-                        </span>
-                      )}
-                    </div>
+                    )}
 
                     {/* Batch-level IRR breakdown by criterion */}
                     {hasIrr && (irrSummary?.perDimension.length ?? 0) > 0 && (

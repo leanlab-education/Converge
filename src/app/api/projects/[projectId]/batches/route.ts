@@ -294,6 +294,9 @@ export async function GET(
               Math.round((totalActualScoreCount / totalExpectedScoreCount) * 100)
             )
           : 0
+      const scoreCount = await prisma.score.count({
+        where: { feedbackItem: { batchId: batch.id } },
+      })
 
       return {
         id: batch.id,
@@ -312,6 +315,7 @@ export async function GET(
         progressPct,
         discrepancyCount,
         reconciledCount,
+        canEditBatchType: scoreCount === 0,
         irrSummary,
         ranges: batch.ranges.map((range) => ({
           id: range.id,
