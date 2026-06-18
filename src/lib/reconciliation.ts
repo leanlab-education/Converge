@@ -181,6 +181,11 @@ export async function maybeAdvanceReleaseAfterScore(
       data: { status: 'RECONCILING' },
     })
     await autoReconcileAgreedScoresForRelease(releaseId)
+    // If the pair agreed on everything there are no discrepancies to resolve,
+    // so the reconcile/adjudicate routes would never fire and the release would
+    // be stranded in RECONCILING forever. Attempt completion now (idempotent;
+    // no-ops when real discrepancies remain). (P1)
+    await maybeCompleteReleaseReconciliation(releaseId)
   } else {
     await prisma.teamBatchRelease.update({
       where: { id: releaseId },

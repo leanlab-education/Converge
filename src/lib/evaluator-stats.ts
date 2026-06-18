@@ -12,6 +12,7 @@ export interface BatchAssignmentForStats {
   userId: string
   teamRelease: {
     id: string
+    scorerUserId: string | null
     team: { members: { userId: string }[] }
   } | null
   batch: {
@@ -87,7 +88,9 @@ export function countForAssignment(
   const releaseContext = ba.teamRelease
     ? {
         id: ba.teamRelease.id,
-        scorerUserId: null,
+        // Honor a single named scorer: such a release is NOT slot-split, so the
+        // scorer is counted for ALL items, not half (P7 — was hardcoded null).
+        scorerUserId: ba.teamRelease.scorerUserId,
         batch: ba.batch,
         team: { members: ba.teamRelease.team.members },
       }
