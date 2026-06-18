@@ -64,11 +64,14 @@ export async function PATCH(
   }
 
   const body = await request.json()
-  const { studyflowStudyId, usePseudonyms } = body
+  const { studyflowStudyId, usePseudonyms, status } = body
 
-  // Note: project.status is intentionally read-only via this endpoint. The
-  // displayed status is derived from batch states in the UI; the DB column is
-  // a stale legacy default and shouldn't be set by the API.
+  // project.status is set manually by an admin (SETUP → ACTIVE etc.); it is
+  // organizational only and does not gate annotator access.
+  const VALID_STATUSES = ['SETUP', 'ACTIVE', 'RECONCILIATION', 'COMPLETE']
+  if (status !== undefined && !VALID_STATUSES.includes(status)) {
+    return NextResponse.json({ error: 'Invalid project status' }, { status: 400 })
+  }
 
   if (
     studyflowStudyId !== undefined &&
@@ -89,6 +92,7 @@ export async function PATCH(
   const updateData: Record<string, any> = {}
   if (studyflowStudyId !== undefined) updateData.studyflowStudyId = studyflowStudyId || null
   if (usePseudonyms !== undefined) updateData.usePseudonyms = Boolean(usePseudonyms)
+  if (status !== undefined) updateData.status = status
 
   const project = await prisma.project.update({
     where: { id: projectId },

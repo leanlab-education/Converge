@@ -42,6 +42,7 @@ import {
   CheckCircle,
   Eye,
   AlertTriangle,
+  ChevronDown,
 } from 'lucide-react'
 import { AppShell } from '@/components/app-shell'
 import { statusColors } from '@/lib/status-colors'
@@ -281,6 +282,20 @@ export function ProjectDetailClient({
     })
   }, [projectId])
 
+  const handleStatusChange = useCallback(async (value: string) => {
+    const previous = project.status
+    setProject((p) => ({ ...p, status: value }))
+    const res = await fetch(`/api/projects/${projectId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: value }),
+    })
+    if (!res.ok) {
+      setProject((p) => ({ ...p, status: previous }))
+      alert('Failed to update project status')
+    }
+  }, [projectId, project.status])
+
   const fetchEvaluators = useCallback(async () => {
     try {
       const res = await fetch(`/api/projects/${projectId}/evaluators`)
@@ -519,25 +534,28 @@ export function ProjectDetailClient({
               <h1 className="text-2xl font-bold tracking-tight">
                 {project.name}
               </h1>
-              {(() => {
-                // Derive display status from batch states
-                const statuses = batches.map((b) => b.status)
-                let displayStatus = project.status
-                if (statuses.length > 0) {
-                  if (statuses.every((s) => s === 'COMPLETE')) displayStatus = 'COMPLETE'
-                  else if (statuses.some((s) => s === 'RECONCILING')) displayStatus = 'RECONCILIATION'
-                  else if (statuses.some((s) => s === 'SCORING')) displayStatus = 'ACTIVE'
-                  else displayStatus = 'SETUP'
-                }
-                return (
-                  <Badge
-                    variant="outline"
-                    className={statusColors[displayStatus] || ''}
-                  >
-                    {displayStatus}
-                  </Badge>
-                )
-              })()}
+              {/* Project status — set manually by an admin (organizational only) */}
+              <div className="relative">
+                <Badge
+                  variant="outline"
+                  className={`${statusColors[project.status] || ''} pr-6`}
+                >
+                  {project.status}
+                </Badge>
+                <select
+                  aria-label="Project status"
+                  value={project.status}
+                  onChange={(e) => handleStatusChange(e.target.value)}
+                  className="absolute inset-0 cursor-pointer opacity-0"
+                  title="Change project status"
+                >
+                  <option value="SETUP">SETUP</option>
+                  <option value="ACTIVE">ACTIVE</option>
+                  <option value="RECONCILIATION">RECONCILIATION</option>
+                  <option value="COMPLETE">COMPLETE</option>
+                </select>
+                <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 size-3 -translate-y-1/2 text-muted-foreground" />
+              </div>
             </div>
             {totalItems > 0 && (
               <Button
