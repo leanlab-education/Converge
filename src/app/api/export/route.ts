@@ -67,7 +67,21 @@ export async function GET(request: NextRequest) {
         ...(activityId ? { activityId } : {}),
         ...(conjunctionId ? { conjunctionId } : {}),
       },
-      isReconciled: type === 'reconciled',
+      // "Reconciled" = the final score per item: the reconciled/adjudicated row
+      // for double-scored & training batches, plus the lone score for
+      // single-scored regular batches (which never reconcile). "Original" =
+      // every raw score, one row per evaluator.
+      ...(type === 'reconciled'
+        ? {
+            OR: [
+              { isReconciled: true },
+              {
+                isReconciled: false,
+                feedbackItem: { batch: { type: 'REGULAR', isDoubleScored: false } },
+              },
+            ],
+          }
+        : { isReconciled: false }),
     },
     include: {
       feedbackItem: {

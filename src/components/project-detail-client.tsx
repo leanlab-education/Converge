@@ -1076,7 +1076,9 @@ export function ProjectDetailClient({
                     Reconciled Scores
                   </CardTitle>
                   <CardDescription>
-                    Final reconciled scores after discrepancy resolution.
+                    The final score for every item: the reconciled/adjudicated
+                    value for double-scored batches, plus the single score for
+                    independent batches.
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
