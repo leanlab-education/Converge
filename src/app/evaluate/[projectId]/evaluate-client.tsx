@@ -163,6 +163,10 @@ export function EvaluateClient({
 
   // Navigation
   const [currentIndex, setCurrentIndex] = useState(0)
+  // When every item is scored we show a completion screen; "Review Scores"
+  // flips this so the scoring UI re-renders and the annotator can page back
+  // through finished items (P13).
+  const [reviewing, setReviewing] = useState(false)
 
   // Per-item scoring state, keyed by feedbackItem id
   const [itemScores, setItemScores] = useState<Record<string, ItemScoreState>>(
@@ -594,7 +598,7 @@ export function EvaluateClient({
   // Completion screen
   // ---------------------------------------------------------------------------
 
-  if (allComplete) {
+  if (allComplete && !reviewing) {
     return (
       <AppShell defaultCollapsed>
         <div className="flex min-h-screen items-center justify-center">
@@ -615,7 +619,10 @@ export function EvaluateClient({
             <CardContent className="flex flex-col gap-3 sm:flex-row sm:justify-center">
               <Button
                 variant="outline"
-                onClick={() => setCurrentIndex(0)}
+                onClick={() => {
+                  setReviewing(true)
+                  setCurrentIndex(0)
+                }}
               >
                 Review Scores
               </Button>

@@ -72,9 +72,12 @@ export async function POST(
     )
   }
 
-  if (!Array.isArray(memberUserIds) || memberUserIds.length === 0) {
+  // A team is a scoring pair. Double-scoring, reconciliation, and IRR all
+  // assume exactly 2 members; a team of any other size silently bricks its
+  // releases in RECONCILING (P2). Enforce it at the source.
+  if (!Array.isArray(memberUserIds) || new Set(memberUserIds).size !== 2) {
     return NextResponse.json(
-      { error: 'At least one member is required' },
+      { error: 'A team must have exactly 2 distinct members (a scoring pair).' },
       { status: 400 }
     )
   }

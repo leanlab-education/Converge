@@ -77,6 +77,13 @@ export async function PATCH(request: Request, { params }: { params: Params }) {
 
   // Validate new members aren't on other teams
   if (memberUserIds) {
+    // A team is a scoring pair — exactly 2 distinct members (see P2 / teams POST).
+    if (new Set(memberUserIds).size !== 2) {
+      return NextResponse.json(
+        { error: 'A team must have exactly 2 distinct members (a scoring pair).' },
+        { status: 400 }
+      )
+    }
     const existingMemberships = await prisma.evaluatorTeamMember.findMany({
       where: {
         userId: { in: memberUserIds },
