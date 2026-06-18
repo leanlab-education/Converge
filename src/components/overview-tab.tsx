@@ -34,9 +34,18 @@ interface EvaluatorRow {
   lastScoredAt: string | null
 }
 
+interface IrrPerDimension {
+  dimensionId: string
+  dimensionLabel: string
+  agreementPct: number | null
+  agreedPairs: number
+  totalPairs: number
+}
+
 interface IrrSummary {
   averageAgreementPct: number | null
   lowestAgreementPct: number | null
+  perDimension?: IrrPerDimension[]
 }
 
 interface BatchRow {
@@ -81,6 +90,13 @@ function formatRelativeTime(iso: string | null): string {
 // ---------------------------------------------------------------------------
 // Sub-components
 // ---------------------------------------------------------------------------
+
+function getIrrColorClass(pct: number | null): string {
+  if (pct == null) return 'text-muted-foreground'
+  if (pct >= 80) return 'text-score-high-text'
+  if (pct >= 70) return 'text-status-active-text'
+  return 'text-destructive'
+}
 
 function ColoredStatCard({
   label, value, sub, icon: Icon, accent,
@@ -189,6 +205,34 @@ export function OverviewTab({
     const pct = ev.assignedCount > 0 ? Math.round((ev.completedCount / ev.assignedCount) * 100) : 0
     return pct < 50 && ev.assignedCount > 0
   })
+
+  // Global per-criterion IRR: pair-weighted exact-match agreement summed across
+  // every double-scored batch (Σ agreed / Σ total per criterion). Ordered by the
+  // project's rubric order.
+  const dimOrder = new Map(project.rubric.map((d, i) => [d.id, i]))
+  const globalDimAgg = new Map<string, { label: string; agreed: number; total: number }>()
+  for (const batch of batches) {
+    for (const dim of batch.irrSummary?.perDimension ?? []) {
+      const entry = globalDimAgg.get(dim.dimensionId) ?? {
+        label: dim.dimensionLabel,
+        agreed: 0,
+        total: 0,
+      }
+      entry.agreed += dim.agreedPairs
+      entry.total += dim.totalPairs
+      globalDimAgg.set(dim.dimensionId, entry)
+    }
+  }
+  const globalIrrRows = Array.from(globalDimAgg.entries())
+    .sort((a, b) => (dimOrder.get(a[0]) ?? 99) - (dimOrder.get(b[0]) ?? 99))
+    .map(([dimensionId, e]) => ({
+      dimensionId,
+      label: e.label,
+      agreedPairs: e.agreed,
+      totalPairs: e.total,
+      agreementPct: e.total > 0 ? Math.round((e.agreed / e.total) * 100) : null,
+    }))
+  const hasGlobalIrr = globalIrrRows.some((r) => r.totalPairs > 0)
 
   const STATUS_ORDER: Record<string, number> = { RECONCILING: 0, SCORING: 1, COMPLETE: 2, DRAFT: 3 }
   const activeBatchRows = [...batches]
@@ -345,6 +389,43 @@ export function OverviewTab({
         </Card>
 
       </div>
+
+      {/* Global IRR by criterion */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm font-semibold">IRR by criterion</CardTitle>
+          <CardDescription>
+            Exact-match agreement across all double-scored batches
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="pb-5">
+          {!hasGlobalIrr ? (
+            <p className="text-sm text-muted-foreground py-4 text-center">
+              No double-scored data yet. Per-criterion IRR appears once annotator
+              pairs finish a double-scored batch.
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {globalIrrRows.map((row) => (
+                <div key={row.dimensionId} className="flex items-center gap-3">
+                  <span className="text-sm font-medium text-foreground w-56 shrink-0 truncate">
+                    {row.label}
+                  </span>
+                  <Progress value={row.agreementPct ?? 0} className="h-1.5 flex-1" />
+                  <span className="text-xs text-muted-foreground w-14 text-right shrink-0 tabular-nums">
+                    {row.totalPairs > 0 ? `${row.agreedPairs}/${row.totalPairs}` : '—'}
+                  </span>
+                  <span
+                    className={`text-xs font-semibold w-10 text-right shrink-0 ${getIrrColorClass(row.agreementPct)}`}
+                  >
+                    {row.agreementPct !== null ? `${row.agreementPct}%` : '—'}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Project Settings */}
       <div className="border-t border-border pt-6">
