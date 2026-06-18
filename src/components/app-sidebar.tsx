@@ -23,11 +23,24 @@ import {
   Moon,
 } from 'lucide-react'
 
+export interface ProjectSubNavItem {
+  value: string
+  label: string
+  icon: React.ReactNode
+  badge?: number
+}
+
 export interface ProjectContext {
   id: string
   name: string
   activeTab: string
   onTabChange: (tab: string) => void
+  // Custom sub-nav (annotators see Scoring/Reconciliation; admins get the
+  // default PROJECT_SUB_NAV when this is omitted).
+  subNav?: ProjectSubNavItem[]
+  // Hide the top-level nav (e.g. annotators don't need the projects list —
+  // they only ever work one project).
+  hideGlobalNav?: boolean
 }
 
 interface AppSidebarProps {
@@ -42,7 +55,7 @@ interface NavItem {
   icon: React.ReactNode
 }
 
-const PROJECT_SUB_NAV = [
+const PROJECT_SUB_NAV: ProjectSubNavItem[] = [
   { value: 'overview', label: 'Overview', icon: <BarChart3 className="size-3.5 shrink-0" /> },
   { value: 'evaluators', label: 'Annotators', icon: <UserCheck className="size-3.5 shrink-0" /> },
   { value: 'teams', label: 'Teams', icon: <UsersRound className="size-3.5 shrink-0" /> },
@@ -111,13 +124,17 @@ export function AppSidebar({ collapsed, onToggle, projectContext }: AppSidebarPr
             icon: <LayoutGrid className="size-4 shrink-0" />,
           },
         ]
-      : [
-          {
-            href: '/',
-            label: 'My Projects',
-            icon: <BookOpen className="size-4 shrink-0" />,
-          },
-        ]
+      : projectContext?.hideGlobalNav
+        ? []
+        : [
+            {
+              href: '/',
+              label: 'My Projects',
+              icon: <BookOpen className="size-4 shrink-0" />,
+            },
+          ]
+
+  const subNav = projectContext?.subNav ?? PROJECT_SUB_NAV
 
   function isActive(href: string) {
     if (href === '/admin/accounts') return pathname === '/admin/accounts'
@@ -197,7 +214,7 @@ export function AppSidebar({ collapsed, onToggle, projectContext }: AppSidebarPr
               </span>
             </div>
             <div className="space-y-0.5">
-              {PROJECT_SUB_NAV.map((item) => {
+              {subNav.map((item) => {
                 const active = projectContext.activeTab === item.value
                 return (
                   <button
@@ -211,6 +228,11 @@ export function AppSidebar({ collapsed, onToggle, projectContext }: AppSidebarPr
                   >
                     {item.icon}
                     <span>{item.label}</span>
+                    {item.badge != null && item.badge > 0 && (
+                      <span className="ml-auto rounded-full bg-sidebar-primary/15 px-1.5 text-[10px] font-semibold text-sidebar-primary">
+                        {item.badge}
+                      </span>
+                    )}
                   </button>
                 )
               })}
@@ -221,7 +243,7 @@ export function AppSidebar({ collapsed, onToggle, projectContext }: AppSidebarPr
         {/* Collapsed project indicator */}
         {projectContext && collapsed && (
           <div className="mt-4 border-t border-sidebar-border pt-4 space-y-1">
-            {PROJECT_SUB_NAV.map((item) => {
+            {subNav.map((item) => {
               const active = projectContext.activeTab === item.value
               return (
                 <button

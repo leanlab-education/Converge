@@ -37,6 +37,13 @@ export default async function HomePage() {
     orderBy: { createdAt: 'desc' },
   })
 
+  // Annotators don't need the projects concept — they only ever work one
+  // project. Drop them straight into it. (Multiple projects, a rare
+  // internal/testing case, still falls back to the picker below.)
+  if (evaluatorProjects.length === 1) {
+    redirect(`/projects/${evaluatorProjects[0].projectId}`)
+  }
+
   // Get batch assignments for this user
   const batchAssignments = await prisma.batchAssignment.findMany({
     where: {
