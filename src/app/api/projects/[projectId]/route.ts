@@ -68,7 +68,9 @@ export async function PATCH(
 
   // project.status is set manually by an admin (SETUP → ACTIVE etc.); it is
   // organizational only and does not gate annotator access.
-  const VALID_STATUSES = ['SETUP', 'ACTIVE', 'RECONCILIATION', 'COMPLETE']
+  // RECONCILIATION is intentionally omitted — reconciliation is an ongoing,
+  // batch-level state, not a project status.
+  const VALID_STATUSES = ['SETUP', 'ACTIVE', 'COMPLETE']
   if (status !== undefined && !VALID_STATUSES.includes(status)) {
     return NextResponse.json({ error: 'Invalid project status' }, { status: 400 })
   }

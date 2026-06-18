@@ -551,7 +551,6 @@ export function ProjectDetailClient({
                 >
                   <option value="SETUP">SETUP</option>
                   <option value="ACTIVE">ACTIVE</option>
-                  <option value="RECONCILIATION">RECONCILIATION</option>
                   <option value="COMPLETE">COMPLETE</option>
                 </select>
                 <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 size-3 -translate-y-1/2 text-muted-foreground" />
