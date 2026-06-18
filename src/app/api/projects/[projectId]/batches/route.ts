@@ -376,49 +376,52 @@ export async function POST(
     const sortOrder = await prisma.batch.count({ where: { projectId } })
     const batchName = `Training Batch ${sortOrder + 1}`
 
-    const batch = await prisma.batch.create({
-      data: {
-        projectId,
-        name: batchName,
-        type: 'TRAINING',
-        status: visibleToTeams ? 'SCORING' : 'DRAFT',
-        size: trainingItemIds.length,
-        sortOrder,
-      },
-    })
-
-    await prisma.feedbackItem.updateMany({
-      where: { id: { in: trainingItemIds }, projectId },
-      data: { batchId: batch.id },
-    })
-
     const teams = await prisma.evaluatorTeam.findMany({
       where: { projectId },
       include: {
         members: {
-          include: {
-            user: {
-              select: {
-                email: true,
-              },
-            },
-          },
+          include: { user: { select: { email: true } } },
           orderBy: { user: { email: 'asc' } },
         },
       },
       orderBy: { name: 'asc' },
     })
 
-    for (const team of teams) {
-      const release = await prisma.teamBatchRelease.create({
+    // Atomic core (P8): the batch, its item migration, and its team releases
+    // commit together so a partial failure can't orphan a half-wired batch.
+    // Assignment + display-order wiring runs after commit (idempotent).
+    const { batch, releaseIds } = await prisma.$transaction(async (tx) => {
+      const created = await tx.batch.create({
         data: {
-          batchId: batch.id,
-          teamId: team.id,
-          isVisible: visibleToTeams,
-          scorerUserId: null,
+          projectId,
+          name: batchName,
+          type: 'TRAINING',
+          status: visibleToTeams ? 'SCORING' : 'DRAFT',
+          size: trainingItemIds.length,
+          sortOrder,
         },
       })
-      await syncBatchAssignmentsForRelease(release.id)
+      await tx.feedbackItem.updateMany({
+        where: { id: { in: trainingItemIds }, projectId },
+        data: { batchId: created.id },
+      })
+      const releaseIds: string[] = []
+      for (const team of teams) {
+        const release = await tx.teamBatchRelease.create({
+          data: {
+            batchId: created.id,
+            teamId: team.id,
+            isVisible: visibleToTeams,
+            scorerUserId: null,
+          },
+        })
+        releaseIds.push(release.id)
+      }
+      return { batch: created, releaseIds }
+    })
+
+    for (const releaseId of releaseIds) {
+      await syncBatchAssignmentsForRelease(releaseId)
     }
 
     if (randomize) {
@@ -576,72 +579,66 @@ export async function POST(
   const sortOrder = await prisma.batch.count({ where: { projectId } })
   const name = `Batch ${sortOrder + 1}`
 
-  const batch = await prisma.batch.create({
-    data: {
-      projectId,
-      name,
-      activityId: activityId || inferredActivityId,
-      conjunctionId: conjunctionId || inferredConjunctionId,
-      type,
-      isDoubleScored,
-      status: visibleToTeams ? 'SCORING' : 'DRAFT',
-      size: selectedItems.length,
-      sortOrder,
-      ranges: {
-        create: rangesToCreate,
-      },
-    },
-  })
-
-  await prisma.feedbackItem.updateMany({
-    where: { id: { in: Array.from(selectedItemIds) } },
-    data: { batchId: batch.id },
-  })
-
-  // Non-double-scored regular: shuffle items into slots A/B at the batch level
-  // (one shuffle, consistent across all team releases). Double-scored and
-  // training don't use slots — every member scores everything.
-  if (type === 'REGULAR' && !isDoubleScored) {
-    await assignBatchSlots(batch.id)
-  }
-
-  if (type === 'REGULAR' || type === 'TRAINING') {
-    const teams = await prisma.evaluatorTeam.findMany({
-      where: { projectId },
-      include: {
-        members: {
+  const teams =
+    type === 'REGULAR' || type === 'TRAINING'
+      ? await prisma.evaluatorTeam.findMany({
+          where: { projectId },
           include: {
-            user: {
-              select: {
-                email: true,
-              },
+            members: {
+              include: { user: { select: { email: true } } },
+              orderBy: { user: { email: 'asc' } },
             },
           },
-          orderBy: { user: { email: 'asc' } },
-        },
-      },
-      orderBy: { name: 'asc' },
-    })
+          orderBy: { name: 'asc' },
+        })
+      : []
 
+  // Atomic core (P8): batch + item migration + ranges + team releases commit
+  // together. Slot/assignment/display-order wiring runs after commit; those
+  // helpers are idempotent and re-derive from the committed rows.
+  const { batch, releaseIds } = await prisma.$transaction(async (tx) => {
+    const created = await tx.batch.create({
+      data: {
+        projectId,
+        name,
+        activityId: activityId || inferredActivityId,
+        conjunctionId: conjunctionId || inferredConjunctionId,
+        type,
+        isDoubleScored,
+        status: visibleToTeams ? 'SCORING' : 'DRAFT',
+        size: selectedItems.length,
+        sortOrder,
+        ranges: { create: rangesToCreate },
+      },
+    })
+    await tx.feedbackItem.updateMany({
+      where: { id: { in: Array.from(selectedItemIds) } },
+      data: { batchId: created.id },
+    })
     const releaseIds: string[] = []
     for (const team of teams) {
-      const release = await prisma.teamBatchRelease.create({
+      const release = await tx.teamBatchRelease.create({
         data: {
-          batchId: batch.id,
+          batchId: created.id,
           teamId: team.id,
           isVisible: visibleToTeams,
           status: visibleToTeams ? 'SCORING' : 'DRAFT',
-          // scorerUserId is now legacy — non-double-scored regular splits items
-          // across both members via slotIndex. Left null going forward.
+          // scorerUserId is set later (single-scorer feature); split is default.
           scorerUserId: null,
         },
       })
       releaseIds.push(release.id)
     }
+    return { batch: created, releaseIds }
+  })
 
-    for (const releaseId of releaseIds) {
-      await syncBatchAssignmentsForRelease(releaseId)
-    }
+  // Non-double-scored regular: shuffle items into slots A/B (one shuffle,
+  // consistent across all team releases). Double-scored/training don't use slots.
+  if (type === 'REGULAR' && !isDoubleScored) {
+    await assignBatchSlots(batch.id)
+  }
+  for (const releaseId of releaseIds) {
+    await syncBatchAssignmentsForRelease(releaseId)
   }
 
   if (randomize) {
@@ -739,20 +736,23 @@ async function handleAutoMode(
           ? `Activity ${activityId} / ${conjunctionId} / Batch ${chunkIdx + 1}`
           : `Activity ${activityId} / ${conjunctionId}`
 
-      const batch = await prisma.batch.create({
-        data: {
-          projectId,
-          name: batchName,
-          activityId: activityId === 'unknown' ? null : activityId,
-          conjunctionId: conjunctionId === 'unknown' ? null : conjunctionId,
-          size: batchSize,
-          sortOrder: sortOrder++,
-        },
-      })
-
-      await prisma.feedbackItem.updateMany({
-        where: { id: { in: chunk.map((item) => item.id) } },
-        data: { batchId: batch.id },
+      // Batch + its item migration commit together (P8).
+      const batch = await prisma.$transaction(async (tx) => {
+        const created = await tx.batch.create({
+          data: {
+            projectId,
+            name: batchName,
+            activityId: activityId === 'unknown' ? null : activityId,
+            conjunctionId: conjunctionId === 'unknown' ? null : conjunctionId,
+            size: batchSize,
+            sortOrder: sortOrder++,
+          },
+        })
+        await tx.feedbackItem.updateMany({
+          where: { id: { in: chunk.map((item) => item.id) } },
+          data: { batchId: created.id },
+        })
+        return created
       })
 
       createdBatches.push({
