@@ -14,6 +14,8 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
     // Generated Prisma client — never lint generated code.
     "src/generated/**",
+    // Agent worktrees contain full .next builds + node_modules — not source.
+    ".claude/**",
   ]),
 ]);
 
