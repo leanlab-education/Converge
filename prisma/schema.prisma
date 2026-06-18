@@ -140,6 +140,10 @@ model FeedbackItem {
   escalations Escalation[]
 
   @@unique([projectId, feedbackId])
+  // Hot paths: batch membership lookups, and the evaluate page loading a
+  // project's batch items in displayOrder. (P10)
+  @@index([batchId])
+  @@index([projectId, batchId, displayOrder])
 }
 
 enum FeedbackSource {
@@ -346,6 +350,11 @@ model Score {
   dimension    RubricDimension @relation(fields: [dimensionId], references: [id], onDelete: Cascade)
 
   @@unique([feedbackItemId, userId, dimensionId, isReconciled])
+  // The unique above is left-prefixed by feedbackItemId, so filters on userId
+  // or dimensionId alone fall back to a seq scan. IRR, reconciliation, scores
+  // GET, and export all filter by these. (P10)
+  @@index([userId])
+  @@index([dimensionId])
 }
 
 // ============================================

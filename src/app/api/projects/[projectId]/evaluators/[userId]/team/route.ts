@@ -1,6 +1,7 @@
 import { auth } from '@/lib/auth'
 import { canAdminProject } from '@/lib/authorization'
 import { prisma } from '@/lib/db'
+import { syncTeamAcrossBatches } from '@/lib/team-batch-releases'
 import { NextResponse } from 'next/server'
 
 type Params = Promise<{ projectId: string; userId: string }>
@@ -112,6 +113,16 @@ export async function PUT(request: Request, { params }: { params: Params }) {
       await tx.evaluatorTeamMember.create({ data: { teamId, userId } })
     }
   })
+
+  // Re-sync every team the change touched (the team(s) left and the team
+  // joined) so their batch assignments reflect the new membership. (P11)
+  const affectedTeamIds = new Set([
+    ...currentTeamIds,
+    ...(teamId !== null ? [teamId] : []),
+  ])
+  for (const affectedTeamId of affectedTeamIds) {
+    await syncTeamAcrossBatches(affectedTeamId)
+  }
 
   return NextResponse.json({ teamId })
 }

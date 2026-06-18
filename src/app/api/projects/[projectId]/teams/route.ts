@@ -1,6 +1,7 @@
 import { auth } from '@/lib/auth'
 import { canAdminProject } from '@/lib/authorization'
 import { prisma } from '@/lib/db'
+import { syncTeamAcrossBatches } from '@/lib/team-batch-releases'
 import { NextRequest, NextResponse } from 'next/server'
 
 // GET /api/projects/[projectId]/teams — list teams with members + dimensions
@@ -173,6 +174,10 @@ export async function POST(
       },
     },
   })
+
+  // Give the new team a (hidden) release on every existing batch + wire
+  // assignments, so it isn't invisible on batches created before it. (P11)
+  await syncTeamAcrossBatches(team.id)
 
   return NextResponse.json(team, { status: 201 })
 }

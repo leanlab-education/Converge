@@ -243,6 +243,43 @@ export async function ensureTeamReleasesForBatch(
   return created
 }
 
+/**
+ * Re-sync a team across every batch in its project after its membership or
+ * dimensions change. Without this, BatchAssignment rows (and, for a brand-new
+ * team, the existence of any TeamBatchRelease at all) go stale: new members
+ * can't score, removed members still can, and a team created after batching is
+ * invisible on existing batches. (P11)
+ *
+ * Safe because team member/dimension edits are blocked once scoring has begun,
+ * so there is no scored data to orphan.
+ */
+export async function syncTeamAcrossBatches(teamId: string) {
+  const team = await prisma.evaluatorTeam.findUnique({
+    where: { id: teamId },
+    select: { projectId: true },
+  })
+  if (!team) return
+
+  const batches = await prisma.batch.findMany({
+    where: { projectId: team.projectId },
+    select: { id: true },
+  })
+  // Create any missing releases (covers a newly-created team) + wire their
+  // assignments.
+  for (const batch of batches) {
+    await ensureTeamReleasesForBatch(batch.id)
+  }
+  // Re-sync assignments for this team's existing releases (covers membership
+  // changes on a team that already had releases).
+  const releases = await prisma.teamBatchRelease.findMany({
+    where: { teamId, batch: { projectId: team.projectId } },
+    select: { id: true },
+  })
+  for (const release of releases) {
+    await syncBatchAssignmentsForRelease(release.id)
+  }
+}
+
 export async function syncBatchAssignmentsForRelease(releaseId: string) {
   const release = await prisma.teamBatchRelease.findUnique({
     where: { id: releaseId },

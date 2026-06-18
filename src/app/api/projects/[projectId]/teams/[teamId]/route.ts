@@ -1,6 +1,7 @@
 import { auth } from '@/lib/auth'
 import { canAdminProject } from '@/lib/authorization'
 import { prisma } from '@/lib/db'
+import { syncTeamAcrossBatches } from '@/lib/team-batch-releases'
 import { NextRequest, NextResponse } from 'next/server'
 
 type Params = Promise<{ projectId: string; teamId: string }>
@@ -175,6 +176,12 @@ export async function PATCH(request: Request, { params }: { params: Params }) {
       },
     })
   })
+
+  // Membership/dimension edits change who should be assigned on existing
+  // batches — re-sync this team's releases + assignments. (P11)
+  if (memberUserIds || dimensionIds) {
+    await syncTeamAcrossBatches(teamId)
+  }
 
   return NextResponse.json(updated)
 }
