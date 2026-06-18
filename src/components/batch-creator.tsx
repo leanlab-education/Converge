@@ -185,6 +185,34 @@ export function BatchCreator({
     }
   }
 
+  async function handleReleaseBatch(batchId: string, release: boolean) {
+    if (
+      !release &&
+      !confirm('Unpublish this batch? It will be hidden from annotators and returned to draft.')
+    ) {
+      return
+    }
+    try {
+      const response = await fetch(
+        `/api/projects/${projectId}/batches/${batchId}/release`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ release }),
+        }
+      )
+      if (response.ok) {
+        await onBatchesChange()
+      } else {
+        const payload = await response.json().catch(() => null)
+        alert(payload?.error || 'Failed to update batch release status')
+      }
+    } catch (error) {
+      console.error('Failed to update batch release status:', error)
+      alert('Something went wrong while updating the batch release status.')
+    }
+  }
+
   async function handleDeleteBatch(batchId: string) {
     if (!confirm('Delete this batch? Items will return to the unbatched pool.')) return
     try {
@@ -347,6 +375,17 @@ export function BatchCreator({
                   ? 'REGULAR_DOUBLE'
                   : 'REGULAR_SINGLE'
 
+            // Release state: a batch is "released" when every team release is
+            // visible to annotators. Per-team toggles can leave it partial.
+            const releaseCount = batch.teamReleases.length
+            const visibleReleaseCount = batch.teamReleases.filter(
+              (r) => r.isVisible
+            ).length
+            const isReleased =
+              releaseCount > 0 && visibleReleaseCount === releaseCount
+            const isPartiallyReleased =
+              visibleReleaseCount > 0 && visibleReleaseCount < releaseCount
+
             return (
               <div
                 key={batch.id}
@@ -422,6 +461,62 @@ export function BatchCreator({
                 {/* Expanded content */}
                 {isExpanded && (
                   <div className="space-y-3 border-t border-border/50 bg-muted/20 px-4 py-3">
+                    {/* Release / publish control */}
+                    <div className="flex items-center justify-between gap-3 rounded-xl border border-border bg-background px-3 py-2.5">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-semibold">
+                            {isReleased
+                              ? 'Released'
+                              : isPartiallyReleased
+                                ? 'Partially released'
+                                : 'Draft'}
+                          </span>
+                          <span
+                            className={cn(
+                              'size-1.5 rounded-full',
+                              isReleased
+                                ? 'bg-score-high-solid'
+                                : isPartiallyReleased
+                                  ? 'bg-status-active-text'
+                                  : 'bg-muted-foreground/40'
+                            )}
+                          />
+                        </div>
+                        <p className="text-[11px] text-muted-foreground">
+                          {isReleased
+                            ? 'Visible to annotators — they can score this batch.'
+                            : isPartiallyReleased
+                              ? `Visible to ${visibleReleaseCount} of ${releaseCount} teams. Release the rest to publish to everyone.`
+                              : 'Hidden from annotators. Release to make it available for scoring.'}
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2">
+                        {!isReleased && (
+                          <Button
+                            size="sm"
+                            className="h-8 rounded-lg text-xs"
+                            disabled={releaseCount === 0}
+                            onClick={() => handleReleaseBatch(batch.id, true)}
+                          >
+                            <Eye className="size-3.5" />
+                            {isPartiallyReleased ? 'Release to all teams' : 'Release batch'}
+                          </Button>
+                        )}
+                        {(isReleased || isPartiallyReleased) && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-8 rounded-lg px-2 text-xs text-muted-foreground hover:text-foreground"
+                            onClick={() => handleReleaseBatch(batch.id, false)}
+                          >
+                            <EyeOff className="size-3.5" />
+                            Unpublish
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+
                     {batch.canEditBatchType && (
                       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-background px-3 py-2.5">
                         <div className="min-w-0">
