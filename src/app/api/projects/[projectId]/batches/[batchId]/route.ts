@@ -3,6 +3,7 @@ import { canAdminProject } from '@/lib/authorization'
 import { assignBatchSlots } from '@/lib/batch-slots'
 import { prisma } from '@/lib/db'
 import {
+  ensureTeamReleasesForBatch,
   syncBatchAssignmentsForRelease,
   syncBatchStatus,
 } from '@/lib/team-batch-releases'
@@ -119,7 +120,14 @@ export async function PATCH(
       })
     }
 
-    for (const release of batch.teamReleases) {
+    // Back-fill releases for any team that lacks one (e.g. a batch created
+    // before its teams existed), then re-sync assignments for all releases.
+    await ensureTeamReleasesForBatch(batchId)
+    const releases = await prisma.teamBatchRelease.findMany({
+      where: { batchId },
+      select: { id: true },
+    })
+    for (const release of releases) {
       await syncBatchAssignmentsForRelease(release.id)
     }
     await syncBatchStatus(batchId)

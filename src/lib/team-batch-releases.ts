@@ -141,6 +141,62 @@ export async function syncBatchStatus(batchId: string) {
   })
 }
 
+/**
+ * Ensure every team in the batch's project has a TeamBatchRelease for this
+ * batch, creating any that are missing (hidden, DRAFT) and wiring up their
+ * assignments. Returns the ids of releases created.
+ *
+ * Releases are normally created at batch-creation time for the teams that
+ * exist then — so a batch created before its teams existed (or before a team
+ * was added) ends up with missing releases and can't be assigned/scored.
+ * This back-fills them. It never removes releases for teams that no longer
+ * exist. New releases are hidden (isVisible=false) so assignment stays
+ * decoupled from visibility.
+ */
+export async function ensureTeamReleasesForBatch(
+  batchId: string
+): Promise<string[]> {
+  const batch = await prisma.batch.findUnique({
+    where: { id: batchId },
+    select: {
+      id: true,
+      projectId: true,
+      teamReleases: { select: { teamId: true } },
+    },
+  })
+  if (!batch) {
+    throw new Error('Batch not found')
+  }
+
+  const existingTeamIds = new Set(batch.teamReleases.map((r) => r.teamId))
+  const teams = await prisma.evaluatorTeam.findMany({
+    where: { projectId: batch.projectId },
+    select: { id: true },
+  })
+  const missingTeams = teams.filter((team) => !existingTeamIds.has(team.id))
+  if (missingTeams.length === 0) {
+    return []
+  }
+
+  const created: string[] = []
+  for (const team of missingTeams) {
+    const release = await prisma.teamBatchRelease.create({
+      data: {
+        batchId,
+        teamId: team.id,
+        isVisible: false,
+        status: 'DRAFT',
+        scorerUserId: null,
+      },
+    })
+    created.push(release.id)
+    await syncBatchAssignmentsForRelease(release.id)
+  }
+
+  await syncBatchStatus(batchId)
+  return created
+}
+
 export async function syncBatchAssignmentsForRelease(releaseId: string) {
   const release = await prisma.teamBatchRelease.findUnique({
     where: { id: releaseId },
