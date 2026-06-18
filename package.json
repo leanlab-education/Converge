@@ -6,7 +6,11 @@
     "dev": "doppler run --project writing-evaluator --config dev -- next dev -p 3333",
     "build": "prisma generate && next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:integration": "doppler run --project writing-evaluator --config dev -- vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.2.0",
@@ -33,6 +37,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@vitest/coverage-v8": "^4.1.9",
     "csv-parse": "^6.2.0",
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
@@ -40,6 +45,8 @@
     "shadcn": "^4.0.2",
     "tailwindcss": "^4",
     "typescript": "^5",
+    "vite-tsconfig-paths": "^6.1.1",
+    "vitest": "^4.1.9",
     "xlsx": "^0.18.5"
   }
 }
