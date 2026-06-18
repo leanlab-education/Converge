@@ -25,6 +25,7 @@ interface TeamReleaseRow {
   isVisible: boolean
   status: string
   scorerUserId: string | null
+  adjudicatorId: string | null
   scorer: { id: string; email: string; name: string | null } | null
   members: { id: string; email: string; name: string | null }[]
   dimensions: { id: string; label: string }[]
@@ -67,7 +68,6 @@ interface BatchRow {
   type: string
   isDoubleScored: boolean
   canEditBatchType?: boolean
-  adjudicatorId?: string | null
   isHidden?: boolean
   ranges: BatchRangeRow[]
   teamReleases: TeamReleaseRow[]
@@ -145,24 +145,6 @@ export function BatchCreator({
     })
   }
 
-  async function handleAdjudicatorChange(
-    batchId: string,
-    adjudicatorId: string | null
-  ) {
-    try {
-      const response = await fetch(`/api/projects/${projectId}/batches/${batchId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ adjudicatorId }),
-      })
-      if (response.ok) {
-        await onBatchesChange({ silent: true })
-      }
-    } catch (error) {
-      console.error('Failed to update adjudicator:', error)
-    }
-  }
-
   async function handleBatchTypeChange(
     batchId: string,
     mode: 'TRAINING' | 'REGULAR_DOUBLE' | 'REGULAR_SINGLE'
@@ -220,7 +202,7 @@ export function BatchCreator({
   async function handleUpdateTeamRelease(
     batchId: string,
     releaseId: string,
-    patch: { isVisible?: boolean; scorerUserId?: string | null }
+    patch: { isVisible?: boolean; scorerUserId?: string | null; adjudicatorId?: string | null }
   ) {
     const previousBatches = localBatches
     setLocalBatches((current) =>
@@ -597,28 +579,30 @@ export function BatchCreator({
                                 {release.isVisible ? 'Visible' : 'Hidden'}
                               </button>
                             </div>
+                            {/* Per-team adjudicator — tiebreaker for this team's escalated discrepancies */}
+                            {batch.type === 'REGULAR' && batch.isDoubleScored && (
+                              <div className="mt-2 flex items-center gap-1.5 border-t border-border/40 pt-2 text-[10px]">
+                                <span className="shrink-0 text-muted-foreground">Adjudicator:</span>
+                                <select
+                                  className="h-6 min-w-0 flex-1 rounded-md border border-border/70 bg-background px-1.5 text-[10px] transition-all duration-200 hover:border-border"
+                                  value={release.adjudicatorId ?? ''}
+                                  onChange={(event) =>
+                                    handleUpdateTeamRelease(batch.id, release.id, {
+                                      adjudicatorId: event.target.value || null,
+                                    })
+                                  }
+                                >
+                                  <option value="">— None —</option>
+                                  {evaluators.map((evaluator) => (
+                                    <option key={evaluator.user.id} value={evaluator.user.id}>
+                                      {evaluator.user.name || evaluator.user.email}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            )}
                           </div>
                         ))}
-                      </div>
-                    )}
-
-                    {batch.type === 'REGULAR' && batch.isDoubleScored && (
-                      <div className="flex items-center gap-2 text-xs">
-                        <span className="text-muted-foreground">Adjudicator:</span>
-                        <select
-                          className="h-7 rounded-lg border border-border/70 bg-background px-2 text-xs transition-all duration-200 hover:border-border"
-                          value={batch.adjudicatorId ?? ''}
-                          onChange={(event) =>
-                            handleAdjudicatorChange(batch.id, event.target.value || null)
-                          }
-                        >
-                          <option value="">— None —</option>
-                          {evaluators.map((evaluator) => (
-                            <option key={evaluator.user.id} value={evaluator.user.id}>
-                              {evaluator.user.name || evaluator.user.email}
-                            </option>
-                          ))}
-                        </select>
                       </div>
                     )}
 

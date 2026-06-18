@@ -80,9 +80,10 @@ export async function PATCH(
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
   const body = await request.json()
-  const { isVisible, scorerUserId } = body as {
+  const { isVisible, scorerUserId, adjudicatorId } = body as {
     isVisible?: boolean
     scorerUserId?: string | null
+    adjudicatorId?: string | null
   }
 
   const release = await getReleaseContext(releaseId)
@@ -131,6 +132,22 @@ export async function PATCH(
     }
   }
 
+  // Adjudicator is the per-team/criterion tiebreaker for escalated discrepancies.
+  // Only meaningful for double-scored regular batches, but any project user may
+  // serve (Amber/Rachel or a peer annotator like Riley) — Amber 2026-06-18.
+  if (adjudicatorId !== undefined && adjudicatorId !== null) {
+    const user = await prisma.user.findUnique({
+      where: { id: adjudicatorId },
+      select: { id: true },
+    })
+    if (!user) {
+      return NextResponse.json(
+        { error: 'Adjudicator user not found' },
+        { status: 400 }
+      )
+    }
+  }
+
   const updated = await prisma.teamBatchRelease.update({
     where: { id: releaseId },
     data: {
@@ -142,6 +159,7 @@ export async function PATCH(
               : {}),
           }
         : {}),
+      ...(adjudicatorId !== undefined ? { adjudicatorId } : {}),
       ...(release.batch.type === 'TRAINING' || release.batch.isDoubleScored
         ? {}
         : scorerUserId !== undefined

@@ -51,7 +51,7 @@ export async function POST(
     where: { id: releaseId },
     include: {
       batch: {
-        select: { projectId: true, adjudicatorId: true },
+        select: { projectId: true },
       },
     },
   })
@@ -67,11 +67,11 @@ export async function POST(
     )
   }
 
-  if (!release.batch.adjudicatorId) {
+  if (!release.adjudicatorId) {
     return NextResponse.json(
       {
         error:
-          'This batch has no adjudicator assigned. Ask an admin to assign one before escalating.',
+          'This team has no adjudicator assigned. Ask an admin to assign one before escalating.',
       },
       { status: 400 }
     )

@@ -24,8 +24,8 @@ export async function GET(_request: NextRequest) {
       ...(globalAdmin
         ? {}
         : adminProjectIds.length > 0
-          ? { OR: [{ batch: { adjudicatorId: session.user.id } }, { batch: { projectId: { in: adminProjectIds } } }] }
-          : { batch: { adjudicatorId: session.user.id } }),
+          ? { OR: [{ teamRelease: { adjudicatorId: session.user.id } }, { batch: { projectId: { in: adminProjectIds } } }] }
+          : { teamRelease: { adjudicatorId: session.user.id } }),
     },
     include: {
       batch: {
@@ -33,7 +33,6 @@ export async function GET(_request: NextRequest) {
           id: true,
           name: true,
           projectId: true,
-          adjudicatorId: true,
           project: { select: { id: true, name: true } },
         },
       },
@@ -210,7 +209,7 @@ export async function POST(request: NextRequest) {
   const escalations = await prisma.escalation.findMany({
     where: { id: { in: ids }, resolvedAt: null },
     include: {
-      batch: { select: { id: true, projectId: true, adjudicatorId: true } },
+      batch: { select: { id: true, projectId: true } },
       teamRelease: {
         include: {
           team: {
@@ -238,9 +237,9 @@ export async function POST(request: NextRequest) {
   const postAdminProjectIds = globalAdmin ? null : new Set(await getAdminProjectIds(session.user.id))
   for (const esc of escalations) {
     const isAdminForThis = globalAdmin || (postAdminProjectIds?.has(esc.batch.projectId) ?? false)
-    if (!isAdminForThis && esc.batch.adjudicatorId !== session.user.id) {
+    if (!isAdminForThis && esc.teamRelease.adjudicatorId !== session.user.id) {
       return NextResponse.json(
-        { error: 'You are not the adjudicator for this batch' },
+        { error: 'You are not the adjudicator for this team' },
         { status: 403 }
       )
     }

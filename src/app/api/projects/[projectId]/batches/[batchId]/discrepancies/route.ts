@@ -45,7 +45,6 @@ export async function GET(
         select: {
           id: true,
           projectId: true,
-          adjudicatorId: true,
           type: true,
           isDoubleScored: true,
         },
@@ -116,7 +115,7 @@ export async function GET(
   const dimensionIds = getExpectedReleaseDimensionIds(release, projectDimensionIds)
   const userIds = release.team.members.map((member) => member.userId)
   const ownerUserId = getReleaseOwnerUserId(release)
-  const hasAdjudicator = release.batch.adjudicatorId != null
+  const hasAdjudicator = release.adjudicatorId != null
 
   const scores = await prisma.score.findMany({
     where: {

@@ -24,7 +24,7 @@ model User {
   scores                Score[]
   batchAssignments      BatchAssignment[]
   teamMemberships       EvaluatorTeamMember[]
-  adjudicatedBatches    Batch[]        @relation("BatchAdjudicator")
+  adjudicatedReleases   TeamBatchRelease[] @relation("TeamReleaseAdjudicator")
   teamBatchReleases     TeamBatchRelease[] @relation("TeamBatchReleaseScorer")
   escalationsCreated    Escalation[]   @relation("EscalationEscalatedBy")
   escalationsResolved   Escalation[]   @relation("EscalationResolvedBy")
@@ -207,12 +207,10 @@ model Batch {
   size           Int         @default(250)    // Target batch size
   isAssigned     Boolean     @default(false)  // Locked after first evaluator assignment
   sortOrder      Int         @default(0)
-  adjudicatorId  String?                      // Third-person tiebreaker for escalated discrepancies
   isHidden       Boolean     @default(false)  // Hide from annotators (e.g. release Independent batches only after Double-Scored IRR passes)
   createdAt      DateTime    @default(now())
 
   project       Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  adjudicator   User?             @relation("BatchAdjudicator", fields: [adjudicatorId], references: [id], onDelete: SetNull)
   feedbackItems FeedbackItem[]
   ranges        BatchRange[]
   assignments   BatchAssignment[]
@@ -265,18 +263,20 @@ model BatchRange {
 }
 
 model TeamBatchRelease {
-  id           String   @id @default(cuid())
-  batchId      String
-  teamId       String
-  scorerUserId String?
-  isVisible    Boolean  @default(false)
-  status       BatchStatus @default(DRAFT)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id            String   @id @default(cuid())
+  batchId       String
+  teamId        String
+  scorerUserId  String?
+  adjudicatorId String?                       // Third-person tiebreaker for this team's escalated discrepancies — per team/criterion pairing, per batch (Amber 2026-06-18)
+  isVisible     Boolean  @default(false)
+  status        BatchStatus @default(DRAFT)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   batch       Batch             @relation(fields: [batchId], references: [id], onDelete: Cascade)
   team        EvaluatorTeam     @relation(fields: [teamId], references: [id], onDelete: Cascade)
   scorerUser  User?             @relation("TeamBatchReleaseScorer", fields: [scorerUserId], references: [id], onDelete: SetNull)
+  adjudicator User?             @relation("TeamReleaseAdjudicator", fields: [adjudicatorId], references: [id], onDelete: SetNull)
   assignments BatchAssignment[]
   escalations Escalation[]
 

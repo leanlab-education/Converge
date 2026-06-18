@@ -247,6 +247,7 @@ export async function GET(
             isVisible: release.isVisible,
             status: release.status,
             scorerUserId: release.scorerUserId,
+            adjudicatorId: release.adjudicatorId,
             scorer:
               release.scorerUser && !batch.isDoubleScored
                 ? {
@@ -308,7 +309,6 @@ export async function GET(
         isDoubleScored: batch.isDoubleScored,
         size: batch.size,
         sortOrder: batch.sortOrder,
-        adjudicatorId: batch.adjudicatorId,
         isHidden: batch.isHidden,
         createdAt: batch.createdAt,
         itemCount: batch._count.feedbackItems,

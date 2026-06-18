@@ -133,7 +133,6 @@ interface BatchRow {
   progressPct: number
   type: string
   isDoubleScored: boolean
-  adjudicatorId?: string | null
   isHidden?: boolean
   discrepancyCount?: number
   reconciledCount?: number
@@ -164,6 +163,7 @@ interface BatchRow {
     isVisible: boolean
     status: string
     scorerUserId: string | null
+    adjudicatorId: string | null
     scorer: { id: string; email: string; name: string | null } | null
     members: { id: string; email: string; name: string | null }[]
     dimensions: { id: string; label: string }[]

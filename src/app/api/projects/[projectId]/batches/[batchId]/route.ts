@@ -23,9 +23,8 @@ export async function PATCH(
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
   const body = await request.json()
-  const { status, adjudicatorId, isHidden, type, isDoubleScored } = body as {
+  const { status, isHidden, type, isDoubleScored } = body as {
     status?: string
-    adjudicatorId?: string | null
     isHidden?: boolean
     type?: 'REGULAR' | 'TRAINING'
     isDoubleScored?: boolean
@@ -33,15 +32,13 @@ export async function PATCH(
 
   if (
     status === undefined &&
-    adjudicatorId === undefined &&
     isHidden === undefined &&
     type === undefined &&
     isDoubleScored === undefined
   ) {
     return NextResponse.json(
       {
-        error:
-          'status, adjudicatorId, isHidden, type, or isDoubleScored is required',
+        error: 'status, isHidden, type, or isDoubleScored is required',
       },
       { status: 400 }
     )
@@ -99,30 +96,14 @@ export async function PATCH(
     }
   }
 
-  // Validate adjudicator exists and (if non-null) is a real user in this project
-  if (adjudicatorId !== undefined && adjudicatorId !== null) {
-    const user = await prisma.user.findUnique({
-      where: { id: adjudicatorId },
-      select: { id: true },
-    })
-    if (!user) {
-      return NextResponse.json(
-        { error: 'Adjudicator user not found' },
-        { status: 400 }
-      )
-    }
-  }
-
   const updated = await prisma.batch.update({
     where: { id: batchId },
     data: {
-      ...(adjudicatorId !== undefined ? { adjudicatorId } : {}),
       ...(isHidden !== undefined ? { isHidden } : {}),
       ...(modeIsChanging
         ? {
             type: nextType,
             isDoubleScored: nextIsDoubleScored,
-            ...(nextType === 'TRAINING' ? { adjudicatorId: null } : {}),
           }
         : {}),
     },
