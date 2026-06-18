@@ -11,11 +11,10 @@ import {
 // and passes a `tx` client. Run the callback with the deep mock acting as tx,
 // so deleteMany/createMany/batch.update assertions hit prismaMock directly.
 beforeEach(() => {
-  prismaMock.$transaction.mockImplementation((arg: unknown) =>
+  prismaMock.$transaction.mockImplementation(((arg: unknown) =>
     typeof arg === 'function'
       ? (arg as (tx: unknown) => unknown)(prismaMock)
-      : Promise.resolve(arg)
-  )
+      : Promise.resolve(arg)) as never)
   // syncBatchStatus runs at the tail of several paths; give it a benign batch.
   prismaMock.batch.findUnique.mockResolvedValue({
     id: 'b1',

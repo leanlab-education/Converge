@@ -524,7 +524,6 @@ async function seedBatch(
     // Apply completion fraction (incomplete batches don't have all targets scored).
     // Bias toward earlier items being scored first (annotators work top-down).
     if (plan.completionFraction < 1) {
-      const keep = Math.floor(scoringTargets.length * plan.completionFraction)
       // Group by user, sort by item displayOrder, keep first N per user
       const byUser = new Map<string, typeof scoringTargets>()
       for (const t of scoringTargets) {
@@ -532,7 +531,7 @@ async function seedBatch(
         byUser.get(t.userId)!.push(t)
       }
       const kept: typeof scoringTargets = []
-      for (const [userId, targets] of byUser) {
+      for (const [, targets] of byUser) {
         const userKeep = Math.floor(targets.length * plan.completionFraction)
         // a little jitter: ±10% so users aren't lockstep
         const jitter = Math.round(targets.length * 0.05 * (Math.random() * 2 - 1))

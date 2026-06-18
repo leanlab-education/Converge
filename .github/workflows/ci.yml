@@ -38,9 +38,5 @@ jobs:
       - name: Unit tests
         run: npm test
 
-      # Non-blocking for now: the repo has pre-existing lint debt (and eslint
-      # currently scans the generated Prisma client). Re-enable as a hard gate
-      # after the lint-cleanup pass.
-      - name: Lint (non-blocking)
+      - name: Lint
         run: npm run lint
-        continue-on-error: true

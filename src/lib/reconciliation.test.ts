@@ -20,8 +20,8 @@ const original: Orig[] = [
 
 function setScores(reconciled: { feedbackItemId: string; dimensionId: string }[]) {
   // The function queries original (isReconciled:false) then reconciled (true).
-  prismaMock.score.findMany.mockImplementation((args: { where?: { isReconciled?: boolean } } = {}) =>
-    Promise.resolve(args.where?.isReconciled ? reconciled : original) as never
+  prismaMock.score.findMany.mockImplementation((args) =>
+    Promise.resolve(args?.where?.isReconciled ? reconciled : original) as never
   )
 }
 
@@ -37,9 +37,9 @@ describe('computeReleaseDiscrepancyStats', () => {
 
   it('does not count an agreed pair as a discrepancy', async () => {
     // Only i2 (agree) present.
-    prismaMock.score.findMany.mockImplementation((args: { where?: { isReconciled?: boolean } } = {}) =>
+    prismaMock.score.findMany.mockImplementation((args) =>
       Promise.resolve(
-        args.where?.isReconciled
+        args?.where?.isReconciled
           ? []
           : original.filter((s) => s.feedbackItemId === 'i2')
       ) as never
@@ -52,9 +52,9 @@ describe('computeReleaseDiscrepancyStats', () => {
   })
 
   it('ignores a single rater (no pair → no discrepancy)', async () => {
-    prismaMock.score.findMany.mockImplementation((args: { where?: { isReconciled?: boolean } } = {}) =>
+    prismaMock.score.findMany.mockImplementation((args) =>
       Promise.resolve(
-        args.where?.isReconciled ? [] : [{ feedbackItemId: 'i1', dimensionId: 'd1', value: 1, userId: 'u0' }]
+        args?.where?.isReconciled ? [] : [{ feedbackItemId: 'i1', dimensionId: 'd1', value: 1, userId: 'u0' }]
       ) as never
     )
     const stats = await computeReleaseDiscrepancyStats({

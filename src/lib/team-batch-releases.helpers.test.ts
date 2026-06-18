@@ -85,12 +85,12 @@ describe('getReleaseOwnerUserId', () => {
   })
 
   it('returns the sole member for a single-member team', () => {
-    const solo = { id: 'r', team: { members: [{ userId: 'only' }] } }
+    const solo = { id: 'r', team: { members: [{ userId: 'only' }] }, scorerUserId: null }
     expect(getReleaseOwnerUserId(solo)).toBe('only')
   })
 
   it('returns null when the team has no members', () => {
-    const empty = { id: 'r', team: { members: [] } }
+    const empty = { id: 'r', team: { members: [] }, scorerUserId: null }
     expect(getReleaseOwnerUserId(empty)).toBeNull()
   })
 

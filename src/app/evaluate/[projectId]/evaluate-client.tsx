@@ -159,7 +159,6 @@ export function EvaluateClient({
   const [items, setItems] = useState<FeedbackItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [teamInfo, setTeamInfo] = useState<TeamInfo | null>(null)
 
   // Navigation
   const [currentIndex, setCurrentIndex] = useState(0)
@@ -224,7 +223,6 @@ export function EvaluateClient({
       let team: TeamInfo | null = null
       if (teamRes.ok) {
         team = await teamRes.json()
-        setTeamInfo(team)
       }
 
       // Preserve the full project rubric for the reference drawer, even when
@@ -311,7 +309,7 @@ export function EvaluateClient({
     } finally {
       setLoading(false)
     }
-  }, [projectId, batchId])
+  }, [projectId, batchId, batchType])
 
   useEffect(() => {
     fetchData()
@@ -471,9 +469,6 @@ export function EvaluateClient({
     saveInProgressRef.current = true
     try {
       const startedAt = currentScoreState.startedAt ?? new Date().toISOString()
-      const durationSeconds = Math.round(
-        (Date.now() - new Date(startedAt).getTime()) / 1000
-      )
 
       // Force-save via PUT (upsert) with timing data
       const res = await fetch('/api/scores', {

@@ -29,14 +29,10 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { Alert, AlertDescription } from '@/components/ui/alert'
 import {
   Plus,
   Upload,
   Download,
-  Users,
-  FileText,
-  BarChart3,
   Loader2,
   ArrowLeft,
   CheckCircle,
@@ -498,8 +494,6 @@ export function ProjectDetailClient({
   }
 
   const totalItems = project._count.feedbackItems
-  const completionPct =
-    totalItems > 0 ? Math.round((scoredItemCount / totalItems) * 100) : 0
 
   // ---------------------------------------------------------------------------
   // JSX

@@ -75,18 +75,6 @@ interface OverviewTabProps {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function formatRelativeTime(iso: string | null): string {
-  if (!iso) return 'Never'
-  const diff = Date.now() - new Date(iso).getTime()
-  const minutes = Math.floor(diff / 60000)
-  if (minutes < 2) return 'Just now'
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  return `${days}d ago`
-}
-
 // ---------------------------------------------------------------------------
 // Sub-components
 // ---------------------------------------------------------------------------
@@ -183,9 +171,7 @@ export function OverviewTab({
   scoredItemCount,
   evaluators,
   batches,
-  projectId,
   onNavigateToTab,
-  onImportData,
   usePseudonyms,
   onTogglePseudonyms,
 }: OverviewTabProps) {

@@ -24,7 +24,8 @@ export function useActivityTracker() {
   const { status } = useSession()
 
   const sessionIdRef = useRef<string | null>(null)
-  const lastActivityRef = useRef<number>(Date.now())
+  // Initialized in the effect (Date.now() is impure — not safe during render).
+  const lastActivityRef = useRef<number>(0)
 
   useEffect(() => {
     if (status !== 'authenticated') return
@@ -32,6 +33,7 @@ export function useActivityTracker() {
     if (!bucket) return
 
     let cancelled = false
+    lastActivityRef.current = Date.now()
 
     const sendHeartbeat = (forBucket: ActivityBucket) => {
       fetch('/api/activity/heartbeat', {

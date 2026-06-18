@@ -3,13 +3,12 @@
 import { useSession, signOut } from 'next-auth/react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { useEffect, useState } from 'react'
+import { useDarkMode } from '@/hooks/use-dark-mode'
 import {
   LayoutGrid,
   BookOpen,
   LogOut,
   PanelLeftClose,
-  PanelLeft,
   PenTool,
   BarChart3,
   UserCheck,
@@ -66,22 +65,11 @@ const PROJECT_SUB_NAV: ProjectSubNavItem[] = [
 ]
 
 function SidebarThemeToggle({ collapsed }: { collapsed: boolean }) {
-  const [dark, setDark] = useState(false)
-
-  useEffect(() => {
-    setDark(document.documentElement.classList.contains('dark'))
-  }, [])
-
-  function toggle() {
-    const next = !dark
-    setDark(next)
-    document.documentElement.classList.toggle('dark', next)
-    localStorage.setItem('theme', next ? 'dark' : 'light')
-  }
+  const [dark, setDark] = useDarkMode()
 
   return (
     <button
-      onClick={toggle}
+      onClick={() => setDark(!dark)}
       className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm text-sidebar-foreground/70 transition-all duration-200 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground ${
         collapsed ? 'justify-center px-0' : ''
       }`}

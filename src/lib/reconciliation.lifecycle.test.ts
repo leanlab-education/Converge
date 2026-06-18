@@ -63,9 +63,8 @@ function setScoreFindMany(
   original: { feedbackItemId: string; dimensionId: string; value: number; userId: string }[],
   reconciled: { feedbackItemId: string; dimensionId: string }[]
 ) {
-  prismaMock.score.findMany.mockImplementation(
-    (args: { where?: { isReconciled?: boolean } } = {}) =>
-      Promise.resolve(args.where?.isReconciled ? reconciled : original) as never
+  prismaMock.score.findMany.mockImplementation((args) =>
+    Promise.resolve(args?.where?.isReconciled ? reconciled : original) as never
   )
 }
 
@@ -281,9 +280,9 @@ describe('maybeAdvanceReleaseAfterScore', () => {
     prismaMock.teamBatchRelease.findUnique.mockImplementation(
       () => Promise.resolve(makeRelease({ status: persistedStatus, isDoubleScored: true })) as never
     )
-    prismaMock.teamBatchRelease.update.mockImplementation((args: { data: { status: string } }) => {
-      persistedStatus = args.data.status
-      return Promise.resolve({} as never)
+    prismaMock.teamBatchRelease.update.mockImplementation((args) => {
+      persistedStatus = (args as { data: { status: string } }).data.status
+      return Promise.resolve({}) as never
     })
     // Fully scored: 1 item × 1 dim × 2 = 2 expected, 2 present.
     prismaMock.feedbackItem.count.mockResolvedValue(1 as never)

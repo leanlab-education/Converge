@@ -1,7 +1,6 @@
 import 'dotenv/config'
 import { PrismaClient } from '../src/generated/prisma/client.js'
 import { PrismaNeon } from '@prisma/adapter-neon'
-import { readFileSync } from 'fs'
 import * as XLSX from 'xlsx'
 
 async function main() {

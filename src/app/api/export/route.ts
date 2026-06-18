@@ -11,7 +11,6 @@ export async function GET(request: NextRequest) {
 
   const projectId = request.nextUrl.searchParams.get('projectId')
   const type = request.nextUrl.searchParams.get('type') || 'original'
-  const format = request.nextUrl.searchParams.get('format') // 'irr' for IRR comparison
   const activityId = request.nextUrl.searchParams.get('activityId')
   const conjunctionId = request.nextUrl.searchParams.get('conjunctionId')
 
