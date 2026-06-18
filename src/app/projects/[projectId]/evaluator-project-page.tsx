@@ -106,6 +106,30 @@ export function EvaluatorProjectPage({
               )}
             </div>
 
+            {reconciliationCount > 0 && (
+              <button
+                onClick={() => setSection('reconciliation')}
+                className="mb-5 flex w-full items-center justify-between gap-3 rounded-xl border border-status-reconciliation-text/20 bg-status-reconciliation-bg/60 px-4 py-3 text-left transition-all duration-200 hover:bg-status-reconciliation-bg"
+              >
+                <div className="flex items-center gap-2.5">
+                  <Scale className="size-4 shrink-0 text-status-reconciliation-text" />
+                  <span className="text-sm font-medium text-foreground">
+                    You have{' '}
+                    {[
+                      reconcileTasks.length > 0 ? `${reconcileTasks.length} to reconcile` : null,
+                      adjudicateTasks.length > 0 ? `${adjudicateTasks.length} to adjudicate` : null,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </span>
+                </div>
+                <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-status-reconciliation-text">
+                  Go to Reconciliation
+                  <ArrowRight className="size-3.5" />
+                </span>
+              </button>
+            )}
+
             {batches.length === 0 ? (
               <div className="py-12 text-center">
                 <Layers className="mx-auto h-12 w-12 text-muted-foreground/50" />
@@ -133,16 +157,16 @@ export function EvaluatorProjectPage({
                           <Badge
                             variant="outline"
                             className={
-                              batchComplete
-                                ? 'bg-status-complete-bg text-status-complete-text'
-                                : isScoring
-                                  ? 'bg-status-active-bg text-status-active-text'
-                                  : isReconciling
-                                    ? 'bg-status-reconciliation-bg text-status-reconciliation-text'
+                              isReconciling
+                                ? 'bg-status-reconciliation-bg text-status-reconciliation-text'
+                                : batchComplete
+                                  ? 'bg-status-complete-bg text-status-complete-text'
+                                  : isScoring
+                                    ? 'bg-status-active-bg text-status-active-text'
                                     : 'text-muted-foreground'
                             }
                           >
-                            {batchComplete ? 'Complete' : isReconciling ? 'Reconciling' : isScoring ? 'Open' : 'Not Open'}
+                            {isReconciling ? 'Reconciling' : batchComplete ? 'Complete' : isScoring ? 'Open' : 'Not Open'}
                           </Badge>
                         </div>
                         <CardDescription>
