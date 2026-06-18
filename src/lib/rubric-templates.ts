@@ -78,10 +78,10 @@ function createCriterion(
 }
 
 // Keep keys stable so existing score rows, exports, and team assignments remain valid.
-export const QUILL_FEEDBACK_RUBRIC_V10: RubricTemplateDefinition = {
-  id: 'quill-feedback-v10',
+export const QUILL_FEEDBACK_RUBRIC_V11: RubricTemplateDefinition = {
+  id: 'quill-feedback-v11',
   name: 'Quill Feedback Rubric',
-  version: 'V10, April 2026',
+  version: 'V11, June 2026',
   dimensions: [
     createCriterion(
       'criterion_1',
@@ -189,13 +189,12 @@ export const QUILL_FEEDBACK_RUBRIC_V10: RubricTemplateDefinition = {
     createCriterion(
       'criterion_4',
       'Actionable Revision',
-      'If revision is needed, does the feedback give a clear next step?',
+      'Does the feedback give a clear next step?',
       {
-        prompt:
-          'If revision is needed, does the feedback give a clear next step?',
+        prompt: 'Does the feedback give a clear next step?',
         meets: [
           paragraph(
-            'Feedback gives a clear and usable next step for revision when revision is needed.'
+            'Feedback gives a clear and usable next step for revision.'
           ),
           bullet(
             'It may ask a question or tell the student what to add, explain, clarify, revise, etc.'
@@ -204,7 +203,7 @@ export const QUILL_FEEDBACK_RUBRIC_V10: RubricTemplateDefinition = {
             'The student could reasonably act on the feedback without additional clarification'
           ),
           bullet(
-            'If student responses did not need revision, the feedback does not need to include a next step'
+            'If the feedback writer determined the student responses did not need revision, the feedback does not need to include a next step (code this 1 - meeting)'
           ),
         ],
         doesNotMeet: [
@@ -219,8 +218,7 @@ export const QUILL_FEEDBACK_RUBRIC_V10: RubricTemplateDefinition = {
       {
         doesNotMeet:
           'The feedback does not give a clear and usable next step.',
-        meets:
-          'Feedback gives a clear and usable next step for revision when revision is needed.',
+        meets: 'Feedback gives a clear and usable next step for revision.',
       }
     ),
     createCriterion(
@@ -234,15 +232,30 @@ export const QUILL_FEEDBACK_RUBRIC_V10: RubricTemplateDefinition = {
             'The feedback is manageable in amount and scope for the learner.'
           ),
           bullet(
-            'It is focused enough that the student could realistically process and use it.'
+            'It is focused enough that the student could realistically process.'
           ),
           bullet(
-            'Feedback addresses no more than two clearly prioritized issues. A student reading this would know immediately what to do first.'
+            'Scope: Feedback addresses no more than two clearly prioritized issues.'
           ),
           bullet(
-            'In general, four sentences or fewer will usually count as manageable.'
+            'Length: In general, four sentences or fewer will usually count as manageable.'
           ),
-          bullet('Student did not need to revise'),
+          bullet(
+            'Student did not need to revise (based on the feedback writer’s decision).'
+          ),
+          label('Decision tree:'),
+          bullet(
+            'Start with length — anything over 4 sentences is an automatic “not manageable” (in the context of the Quill product/activity).'
+          ),
+          bullet(
+            'If fewer than 4 sentences, weigh the criteria above, then check scope (see above).'
+          ),
+          bullet(
+            'If the student did not need to revise (based on the feedback writer’s decision), then score “1”.'
+          ),
+          paragraph(
+            'NOTE: This doesn’t necessarily mean the feedback is “good”; the focus of this criterion is to assess the feedback’s scope/size/length. Parameters of manageability are dependent on the product (task).'
+          ),
         ],
         doesNotMeet: [
           paragraph(
@@ -253,9 +266,6 @@ export const QUILL_FEEDBACK_RUBRIC_V10: RubricTemplateDefinition = {
           ),
           bullet(
             'The feedback is too long, too dense, or includes too many suggestions at once.'
-          ),
-          bullet(
-            'The feedback is too short: there are one or two (small) things the student could also have fixed that would have led to a complete success, rather than needing to spend another attempt fixing a small error.'
           ),
         ],
       },
@@ -278,10 +288,22 @@ export const QUILL_FEEDBACK_RUBRIC_V10: RubricTemplateDefinition = {
             'Feedback is clearly based on the student’s specific response.'
           ),
           bullet(
-            'It clearly references, builds on, or responds to the student’s specific idea, wording, or use of evidence'
+            'Feedback specifically references, builds on, or responds to the student’s specific idea, wording, or use of evidence (e.g., echoes the student’s words or is an accurate observation/response to something the student did).'
           ),
           bullet(
-            'Demonstrates an accurate understanding of what the student wrote'
+            'Demonstrates an accurate understanding of what the student wrote.'
+          ),
+          label(
+            'Re-directing to be task aligned — when feedback directs students to be task aligned when they are not, we consider it anchored:'
+          ),
+          bullet(
+            'If a student plagiarises, and the feedback tells the student to use their own words, this counts as a “1” because it’s responsive to the student’s wording choice of plagiarizing.'
+          ),
+          bullet(
+            'If a student uses evidence (or opinion) that is OUTSIDE the text and the feedback writer addresses that, re-directing the student, this can count as “1” because it’s responding specifically to the student’s choice of bringing in superfluous info.'
+          ),
+          bullet(
+            'If a student writes more than one sentence and the feedback writer tells the student to write one sentence, then that is a “1”.'
           ),
         ],
         doesNotMeet: [
@@ -289,7 +311,7 @@ export const QUILL_FEEDBACK_RUBRIC_V10: RubricTemplateDefinition = {
             'Feedback is not clearly based on the student’s specific response.'
           ),
           bullet(
-            'It is generic and could apply to any response (e.g., template-like comments),'
+            'It is generic and could apply to any response (e.g., template-like comments).'
           ),
           bullet(
             'It is based on a misinterpretation or misunderstanding of the student’s response'
@@ -390,4 +412,4 @@ export const QUILL_FEEDBACK_RUBRIC_V10: RubricTemplateDefinition = {
   ],
 }
 
-export const DEFAULT_RUBRIC = QUILL_FEEDBACK_RUBRIC_V10.dimensions
+export const DEFAULT_RUBRIC = QUILL_FEEDBACK_RUBRIC_V11.dimensions

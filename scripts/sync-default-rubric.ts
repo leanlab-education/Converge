@@ -41,7 +41,7 @@ async function main() {
     const existingByKey = new Map(
       project.rubric.map((dimension) => [dimension.key, dimension])
     )
-    const updates = DEFAULT_RUBRIC.map((template, index) => {
+    const updates = DEFAULT_RUBRIC.map((template) => {
       const existing = existingByKey.get(template.key)
 
       if (!existing) {
@@ -50,6 +50,9 @@ async function main() {
         )
       }
 
+      // Note: sortOrder is intentionally NOT synced — criterion ordering is
+      // managed per-project (it drives team/criterion pairings via
+      // scripts/reorder-rubric-pairs.ts). This script only syncs content.
       return {
         id: existing.id,
         before: {
@@ -61,7 +64,6 @@ async function main() {
         after: {
           label: template.label,
           description: template.description,
-          sortOrder: index,
           scaleMin: template.scaleMin,
           scaleMax: template.scaleMax,
           scoreLabelJson: JSON.stringify(template.scoreLabels),
