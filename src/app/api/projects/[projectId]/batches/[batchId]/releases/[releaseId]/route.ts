@@ -107,26 +107,23 @@ export async function PATCH(
     !release.batch.isDoubleScored &&
     scorerUserId !== undefined
   ) {
-    if (!scorerUserId) {
-      return NextResponse.json(
-        { error: 'A scorer must be selected for non-double-scored batches' },
-        { status: 400 }
+    // null = split 50/50 between the pair; a userId = single named scorer who
+    // must be a member of this team.
+    if (scorerUserId) {
+      const belongsToTeam = release.team.members.some(
+        (member) => member.userId === scorerUserId
       )
-    }
-
-    const belongsToTeam = release.team.members.some(
-      (member) => member.userId === scorerUserId
-    )
-    if (!belongsToTeam) {
-      return NextResponse.json(
-        { error: 'Selected scorer must be a member of this team' },
-        { status: 400 }
-      )
+      if (!belongsToTeam) {
+        return NextResponse.json(
+          { error: 'Selected scorer must be a member of this team' },
+          { status: 400 }
+        )
+      }
     }
 
     if (scorerUserId !== release.scorerUserId && (await hasReleaseScores(releaseId))) {
       return NextResponse.json(
-        { error: 'Cannot change the scorer after scoring has begun for this team' },
+        { error: 'Cannot change the scoring assignment after scoring has begun for this team' },
         { status: 400 }
       )
     }

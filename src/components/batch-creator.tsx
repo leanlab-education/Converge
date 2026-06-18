@@ -696,6 +696,28 @@ export function BatchCreator({
                                 </select>
                               </div>
                             )}
+                            {/* Per-team scorer — split 50/50 or assign one named scorer (non-double regular) */}
+                            {batch.type === 'REGULAR' && !batch.isDoubleScored && release.members.length >= 2 && (
+                              <div className="mt-2 flex items-center gap-1.5 border-t border-border/40 pt-2 text-[10px]">
+                                <span className="shrink-0 text-muted-foreground">Scorer:</span>
+                                <select
+                                  className="h-6 min-w-0 flex-1 rounded-md border border-border/70 bg-background px-1.5 text-[10px] transition-all duration-200 hover:border-border"
+                                  value={release.scorerUserId ?? ''}
+                                  onChange={(event) =>
+                                    handleUpdateTeamRelease(batch.id, release.id, {
+                                      scorerUserId: event.target.value || null,
+                                    })
+                                  }
+                                >
+                                  <option value="">Split 50/50 between pair</option>
+                                  {release.members.map((m) => (
+                                    <option key={m.id} value={m.id}>
+                                      {m.name || m.email}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>

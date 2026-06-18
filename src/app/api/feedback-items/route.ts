@@ -1,6 +1,7 @@
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { canAdminProject } from '@/lib/authorization'
+import { getReleaseItemScope } from '@/lib/team-batch-releases'
 import { FeedbackSource } from '@/generated/prisma/client'
 import { NextRequest, NextResponse } from 'next/server'
 
@@ -50,6 +51,7 @@ export async function GET(request: NextRequest) {
           teamRelease: {
             select: {
               id: true,
+              scorerUserId: true,
               batch: { select: { type: true, isDoubleScored: true } },
               team: {
                 select: {
@@ -69,16 +71,22 @@ export async function GET(request: NextRequest) {
       }
 
       const release = assignment.teamRelease
-      if (
-        release &&
-        release.batch.type === 'REGULAR' &&
-        !release.batch.isDoubleScored &&
-        release.team.members.length >= 2
-      ) {
-        const sortedUserIds = release.team.members.map((m) => m.userId)
-        const userSlot = sortedUserIds.indexOf(session.user.id)
-        if (userSlot !== -1) {
-          slotFilter = userSlot
+      if (release) {
+        const scope = getReleaseItemScope(
+          {
+            id: release.id,
+            scorerUserId: release.scorerUserId,
+            isDoubleScored: release.batch.isDoubleScored,
+            batchType: release.batch.type,
+            team: { members: release.team.members },
+          },
+          session.user.id
+        )
+        if (scope.mode === 'none') {
+          return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+        }
+        if (scope.mode === 'slot') {
+          slotFilter = scope.slotIndex
         }
       }
     } else {
@@ -96,6 +104,7 @@ export async function GET(request: NextRequest) {
           batch: { select: { id: true, type: true, isDoubleScored: true } },
           teamRelease: {
             select: {
+              scorerUserId: true,
               team: {
                 select: {
                   members: {
@@ -109,15 +118,24 @@ export async function GET(request: NextRequest) {
         },
       })
       crossBatchOr = accessibleAssignments.map((a) => {
-        const isSlotSplit =
-          a.batch.type === 'REGULAR' &&
-          !a.batch.isDoubleScored &&
-          a.teamRelease &&
-          a.teamRelease.team.members.length >= 2
-        if (isSlotSplit) {
-          const ids = a.teamRelease!.team.members.map((m) => m.userId)
-          const slot = ids.indexOf(session.user.id)
-          return { batchId: a.batch.id, slotIndex: slot >= 0 ? slot : -1 }
+        if (!a.teamRelease) return { batchId: a.batch.id }
+        const scope = getReleaseItemScope(
+          {
+            id: a.batch.id,
+            scorerUserId: a.teamRelease.scorerUserId,
+            isDoubleScored: a.batch.isDoubleScored,
+            batchType: a.batch.type,
+            team: { members: a.teamRelease.team.members },
+          },
+          session.user.id
+        )
+        if (scope.mode === 'slot') {
+          return { batchId: a.batch.id, slotIndex: scope.slotIndex }
+        }
+        if (scope.mode === 'none') {
+          // Assigned row but no items for this user (e.g. not the named scorer) —
+          // match nothing for this batch.
+          return { batchId: a.batch.id, slotIndex: -1 }
         }
         return { batchId: a.batch.id }
       })

@@ -21,11 +21,56 @@ interface ReleaseWithContext {
   }
 }
 
+/**
+ * True when a non-double-scored regular release is assigned to ONE named scorer
+ * (release.scorerUserId) rather than split 50/50 between the pair. Only regular
+ * non-double batches can use a single scorer; training/double always use every
+ * member.
+ */
+export function usesSingleScorer(release: ReleaseWithContext): boolean {
+  const batchType = release.batch?.type ?? release.batchType
+  const isDoubleScored = release.batch?.isDoubleScored ?? release.isDoubleScored
+  return (
+    batchType === 'REGULAR' && !isDoubleScored && Boolean(release.scorerUserId)
+  )
+}
+
 export function getExpectedReleaseUserIds(release: ReleaseWithContext): string[] {
-  // Every team member is assigned to the release.
+  // Single named scorer (non-double regular): only that person is assigned.
+  if (usesSingleScorer(release)) {
+    return release.team.members.some((m) => m.userId === release.scorerUserId)
+      ? [release.scorerUserId as string]
+      : []
+  }
+  // Otherwise every team member is assigned to the release.
   //   - TRAINING & double-scored: every member scores every item.
-  //   - Non-double-scored regular: every member scores half the items (split by slotIndex).
+  //   - Non-double-scored regular (split): every member scores half (by slotIndex).
   return release.team.members.map((member) => member.userId)
+}
+
+export type ReleaseItemScope =
+  | { mode: 'all' }
+  | { mode: 'slot'; slotIndex: number }
+  | { mode: 'none' }
+
+/**
+ * The single source of truth for "which of a release's items does this user
+ * score": everything, just their slot half, or none. Replaces the slot logic
+ * that used to be inlined in the feedback-items route.
+ */
+export function getReleaseItemScope(
+  release: ReleaseWithContext,
+  userId: string
+): ReleaseItemScope {
+  const isMember = release.team.members.some((m) => m.userId === userId)
+  if (usesSingleScorer(release)) {
+    return userId === release.scorerUserId ? { mode: 'all' } : { mode: 'none' }
+  }
+  if (isSlotSplitRelease(release)) {
+    const idx = release.team.members.findIndex((m) => m.userId === userId)
+    return idx === -1 ? { mode: 'none' } : { mode: 'slot', slotIndex: idx }
+  }
+  return isMember ? { mode: 'all' } : { mode: 'none' }
 }
 
 /**
@@ -85,6 +130,7 @@ export function isSlotSplitRelease(release: ReleaseWithContext): boolean {
   return (
     batchType === 'REGULAR' &&
     !isDoubleScored &&
+    !release.scorerUserId &&
     release.team.members.length >= 2
   )
 }
