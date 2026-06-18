@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db'
 import { EvaluatorDashboard } from '@/components/evaluator-dashboard'
 import { countForAssignment, loadSlotMaps } from '@/lib/evaluator-stats'
 import { getAdminProjectIds } from '@/lib/authorization'
+import { computeReleaseDiscrepancyStats } from '@/lib/reconciliation'
 
 export default async function HomePage() {
   const session = await auth()
@@ -108,63 +109,15 @@ export default async function HomePage() {
     let discrepancyCount: number | undefined
     let reconciledCount: number | undefined
     if (ba.teamRelease && releaseStatus === 'RECONCILING') {
-      const dimensionIds =
-        ba.batch.type === 'TRAINING'
-          ? (
-              await prisma.rubricDimension.findMany({
-                where: { projectId: ba.batch.project.id },
-                select: { id: true },
-              })
-            ).map((dimension) => dimension.id)
-          : ba.teamRelease.team.dimensions.map((dimension) => dimension.dimensionId)
-      const userIds = ba.teamRelease.team.members.map((member) => member.userId)
-      const ownerUserId = ba.teamRelease.team.members[0]?.userId
-
-      const originalScores = await prisma.score.findMany({
-        where: {
-          feedbackItem: { batchId: ba.batch.id },
-          userId: { in: userIds },
-          dimensionId: { in: dimensionIds },
-          isReconciled: false,
-        },
-        select: { feedbackItemId: true, dimensionId: true, value: true, userId: true },
+      const stats = await computeReleaseDiscrepancyStats({
+        batchId: ba.batch.id,
+        batchType: ba.batch.type,
+        projectId: ba.batch.project.id,
+        memberUserIds: ba.teamRelease.team.members.map((m) => m.userId),
+        teamDimensionIds: ba.teamRelease.team.dimensions.map((d) => d.dimensionId),
       })
-      const groups = new Map<string, { value: number; userId: string }[]>()
-      for (const s of originalScores) {
-        const key = `${s.feedbackItemId}::${s.dimensionId}`
-        if (!groups.has(key)) groups.set(key, [])
-        groups.get(key)!.push({ value: s.value, userId: s.userId })
-      }
-      discrepancyCount = 0
-      const discrepantKeys = new Set<string>()
-      for (const [key, values] of groups) {
-        if (
-          values.length === 2 &&
-          values[0].userId !== values[1].userId &&
-          values[0].value !== values[1].value
-        ) {
-          discrepancyCount++
-          discrepantKeys.add(key)
-        }
-      }
-      if (ownerUserId) {
-        // Only count reconciled scores that resolved an actual discrepancy.
-        // Auto-reconciled agreed pairs also have isReconciled=true but they
-        // weren't disagreements, so they shouldn't count toward the "X / Y
-        // reconciled" progress display.
-        const reconciledScores = await prisma.score.findMany({
-          where: {
-            feedbackItem: { batchId: ba.batch.id },
-            userId: ownerUserId,
-            dimensionId: { in: dimensionIds },
-            isReconciled: true,
-          },
-          select: { feedbackItemId: true, dimensionId: true },
-        })
-        reconciledCount = reconciledScores.filter((r) =>
-          discrepantKeys.has(`${r.feedbackItemId}::${r.dimensionId}`)
-        ).length
-      }
+      discrepancyCount = stats.discrepancyCount
+      reconciledCount = stats.reconciledCount
     }
 
     batchesByProject.get(pid)!.push({
