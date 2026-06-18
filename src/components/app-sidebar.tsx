@@ -19,7 +19,6 @@ import {
   Ruler,
   Download,
   ChevronRight,
-  Scale,
   Sun,
   Moon,
 } from 'lucide-react'
@@ -117,11 +116,6 @@ export function AppSidebar({ collapsed, onToggle, projectContext }: AppSidebarPr
             href: '/',
             label: 'My Projects',
             icon: <BookOpen className="size-4 shrink-0" />,
-          },
-          {
-            href: '/reconcile',
-            label: 'Reconcile',
-            icon: <Scale className="size-4 shrink-0" />,
           },
         ]
 

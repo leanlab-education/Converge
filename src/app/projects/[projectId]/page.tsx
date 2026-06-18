@@ -3,6 +3,8 @@ import { prisma } from '@/lib/db'
 import { redirect } from 'next/navigation'
 import { EvaluatorProjectPage } from './evaluator-project-page'
 import { countForAssignment, loadSlotMaps } from '@/lib/evaluator-stats'
+import { computeReleaseDiscrepancyStats } from '@/lib/reconciliation'
+import { displayAnnotatorName } from '@/lib/generate-name'
 
 export default async function ProjectPage({
   params,
@@ -14,18 +16,24 @@ export default async function ProjectPage({
   if (session.user.role === 'ADMIN') redirect('/admin')
 
   const { projectId } = await params
+  const userId = session.user.id
 
   // Verify this evaluator belongs to the project
   const projectEvaluator = await prisma.projectEvaluator.findUnique({
-    where: { projectId_userId: { projectId, userId: session.user.id } },
-    include: { project: { select: { id: true, name: true, description: true } } },
+    where: { projectId_userId: { projectId, userId } },
+    include: {
+      project: {
+        select: { id: true, name: true, description: true, usePseudonyms: true },
+      },
+    },
   })
   if (!projectEvaluator) redirect('/')
+  const usePseudonyms = projectEvaluator.project.usePseudonyms
 
   // Fetch batch assignments for this user + project
   const batchAssignments = await prisma.batchAssignment.findMany({
     where: {
-      userId: session.user.id,
+      userId,
       OR: [{ teamReleaseId: null }, { teamRelease: { isVisible: true } }],
       batch: { projectId, isHidden: false },
     },
@@ -34,8 +42,14 @@ export default async function ProjectPage({
         include: {
           team: {
             include: {
-              members: { select: { userId: true }, orderBy: { user: { email: 'asc' } } },
-              dimensions: { select: { dimensionId: true } },
+              members: {
+                include: { user: { select: { id: true, name: true, email: true } } },
+                orderBy: { user: { email: 'asc' } },
+              },
+              dimensions: {
+                include: { dimension: { select: { id: true, label: true, sortOrder: true } } },
+                orderBy: { dimension: { sortOrder: 'asc' } },
+              },
             },
           },
         },
@@ -51,13 +65,13 @@ export default async function ProjectPage({
 
   const { itemCountByBatchSlot, scoredCountByBatchSlot } = await loadSlotMaps(
     batchAssignments.map((ba) => ba.batch.id),
-    session.user.id
+    userId
   )
 
   const batches = batchAssignments.map((ba) => {
-    const itemCount = countForAssignment(ba, session.user.id, itemCountByBatchSlot)
+    const itemCount = countForAssignment(ba, userId, itemCountByBatchSlot)
     const scoredCount = scoredCountByBatchSlot
-      ? countForAssignment(ba, session.user.id, scoredCountByBatchSlot)
+      ? countForAssignment(ba, userId, scoredCountByBatchSlot)
       : 0
     const releaseStatus = ba.teamRelease?.status ?? ba.batch.status
     const releaseId = ba.teamReleaseId ?? null
@@ -71,10 +85,87 @@ export default async function ProjectPage({
     }
   })
 
+  // --- Reconciliation: discrepancies to resolve with your own partner ---
+  const reconcileTasks = await Promise.all(
+    batchAssignments
+      .filter((ba) => ba.teamRelease?.status === 'RECONCILING')
+      .map(async (ba) => {
+        const release = ba.teamRelease!
+        const stats = await computeReleaseDiscrepancyStats({
+          batchId: ba.batch.id,
+          batchType: ba.batch.type,
+          projectId,
+          memberUserIds: release.team.members.map((m) => m.userId),
+          teamDimensionIds: release.team.dimensions.map((d) => d.dimensionId),
+        })
+        const partner = release.team.members.find((m) => m.userId !== userId)?.user ?? null
+        return {
+          releaseId: release.id,
+          batchId: ba.batch.id,
+          batchName: ba.batch.name,
+          criteria: release.team.dimensions.map((d) => d.dimension.label),
+          partnerName: partner
+            ? displayAnnotatorName(partner.id, partner.name, usePseudonyms)
+            : null,
+          discrepancyCount: stats.discrepancyCount,
+          reconciledCount: stats.reconciledCount,
+        }
+      })
+  )
+
+  // --- Adjudication: items escalated to you for another group in this project ---
+  const myEscalations = await prisma.escalation.findMany({
+    where: {
+      resolvedAt: null,
+      batch: { projectId },
+      teamRelease: { adjudicatorId: userId },
+    },
+    include: {
+      batch: { select: { name: true } },
+      teamRelease: {
+        select: {
+          id: true,
+          team: {
+            select: {
+              name: true,
+              dimensions: {
+                include: { dimension: { select: { label: true, sortOrder: true } } },
+                orderBy: { dimension: { sortOrder: 'asc' } },
+              },
+            },
+          },
+        },
+      },
+    },
+    orderBy: { createdAt: 'asc' },
+  })
+
+  const adjudicateMap = new Map<
+    string,
+    { releaseId: string; batchName: string; teamName: string; criteria: string[]; count: number }
+  >()
+  for (const esc of myEscalations) {
+    const existing = adjudicateMap.get(esc.teamReleaseId)
+    if (existing) {
+      existing.count++
+    } else {
+      adjudicateMap.set(esc.teamReleaseId, {
+        releaseId: esc.teamReleaseId,
+        batchName: esc.batch.name,
+        teamName: esc.teamRelease.team.name,
+        criteria: esc.teamRelease.team.dimensions.map((d) => d.dimension.label),
+        count: 1,
+      })
+    }
+  }
+  const adjudicateTasks = Array.from(adjudicateMap.values())
+
   return (
     <EvaluatorProjectPage
       project={projectEvaluator.project}
       batches={batches}
+      reconcileTasks={reconcileTasks}
+      adjudicateTasks={adjudicateTasks}
       userName={session.user.name || session.user.email || 'Annotator'}
     />
   )
