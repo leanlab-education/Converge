@@ -366,7 +366,9 @@ export function BatchCreator({
             const irrSummary = batch.irrSummary
             const avgIrr = irrSummary?.averageAgreementPct ?? null
             const lowIrr = irrSummary?.lowestAgreementPct ?? null
-            const isIrrEligible = batch.type === 'REGULAR' && batch.isDoubleScored
+            const isIrrEligible =
+              (batch.type === 'REGULAR' && batch.isDoubleScored) ||
+              batch.type === 'TRAINING'
             const hasIrr = isIrrEligible && (irrSummary?.applicableTeamCount ?? 0) > 0
             const batchModeValue =
               batch.type === 'TRAINING'
@@ -546,7 +548,7 @@ export function BatchCreator({
                         </select>
                         {!isIrrEligible && (
                           <span className="text-[11px] text-muted-foreground">
-                            IRR only applies to double-scored batches.
+                            IRR applies to double-scored and training batches.
                           </span>
                         )}
                       </div>

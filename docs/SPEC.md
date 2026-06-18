@@ -86,7 +86,7 @@ Schema: `prisma/schema.prisma`. All IDs are `cuid()`. All models cascade-delete 
 - **`ActivityDaily`** (`schema.prisma:444`): per-user-per-UTC-day rollup (`annotationSeconds`, `otherSeconds`); recomputed on heartbeat; overlapping multi-tab/device intervals merged at aggregation. (Secondary feature; covered lightly here.)
 
 ### 1.16 IRR (inter-rater reliability)
-- Computed by `computeBatchIRRSummary` (`src/lib/irr.ts`). **Exact-match agreement, no tolerance band.** Defined **only for double-scored REGULAR batches**. See §3.G for full semantics. `IRR_READY_THRESHOLD_PCT = 80` (`irr.ts:19`) is a display "ready" flag, **not an automatic gate**.
+- Computed by `computeBatchIRRSummary` (`src/lib/irr.ts`). **Exact-match agreement, no tolerance band.** Defined for **double-scored REGULAR batches** (across each team's assigned criteria) **and TRAINING batches** (across all project criteria). See §3.G for full semantics. `IRR_READY_THRESHOLD_PCT = 80` (`irr.ts:19`) is a display "ready" flag, **not an automatic gate**.
 
 ---
 
@@ -338,15 +338,16 @@ Given the release statuses:
 - A non-adjudicator, non-admin cannot resolve another team's escalation (I-16).
 
 ### 3.G IRR semantics (`src/lib/irr.ts`)
-- **Applicable only** when `batch.type === 'REGULAR' && batch.isDoubleScored` (`irr.ts:87`). Single-scored and TRAINING → not applicable; the summary returns all-null with `isApplicable:false` per team.
-- A team release is IRR-applicable only if its team has **exactly 2 members** and **≥1 dimension** (`irr.ts:89-93`).
+- **Applicable** when the batch is **double-scored REGULAR** (`type === 'REGULAR' && isDoubleScored`) **or TRAINING** — both have every team member score the same items, so pairwise exact-match agreement applies the same way (`irr.ts:88-90`). Single-scored REGULAR → not applicable; the summary returns all-null with `isApplicable:false` per team.
+- **Criterion set differs by batch type:** double-scored compares across each team's **assigned dimensions**; TRAINING compares across **all project rubric dimensions** (every member scores every criterion — `getExpectedReleaseDimensionIds`), fetched via `prisma.rubricDimension.findMany` (`irr.ts:96-118`).
+- A team release is IRR-applicable only if its team has **exactly 2 members** and **≥1 dimension** in its effective criterion set.
 - **Pre-reconciliation only:** only `isReconciled:false` scores are considered (`irr.ts:138`).
 - **Exact match:** for each `(item, dimension)` where **both** members scored, count agreement iff `value[0] === value[1]` (`irr.ts:210-213`). Pairs where only one member scored are ignored (`size !== 2` skip).
 - **Per dimension:** `perDimension[]` per team and a **batch-level rollup** aggregating agreed/total across team releases, sorted by `sortOrder`.
 - **`agreementPct = round(agreed/total*100)`**, null when total=0.
 - **Team "ready"** iff `agreementPct >= 80` (`IRR_READY_THRESHOLD_PCT`) — display flag only, **no automatic gate**; admins decide when to release independent batches (`irr.ts:11-17`).
 - **Batch summary:** `applicableTeamCount`, `computedTeamCount` (teams with non-null pct), `readyTeamCount`, `averageAgreementPct` (mean over computed teams), `lowestAgreementPct` (min over computed teams), `perDimension`, `teams`.
-- IRR is surfaced in `GET .../batches` only when the batch is double-scored REGULAR and in `SCORING|RECONCILING|COMPLETE` (`batches/route.ts:139`); also fed to admin Overview for the **global rollup**.
+- IRR is surfaced in `GET .../batches` when the batch is double-scored REGULAR **or TRAINING** and in `SCORING|RECONCILING|COMPLETE` (`batches/route.ts`); also fed to admin Overview for the **global rollup** (which sums `perDimension` across all batch types).
 
 **Invariants:**
 - IRR ignores reconciled rows (I-5).

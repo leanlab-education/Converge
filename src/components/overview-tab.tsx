@@ -387,8 +387,8 @@ export function OverviewTab({
         <CardContent className="pb-5">
           {!hasGlobalIrr ? (
             <p className="text-sm text-muted-foreground py-4 text-center">
-              No double-scored data yet. Per-criterion IRR appears once annotator
-              pairs finish a double-scored batch.
+              No IRR data yet. Per-criterion IRR appears once annotator pairs
+              score a double-scored or training batch.
             </p>
           ) : (
             <div className="space-y-3">

@@ -137,9 +137,13 @@ export async function GET(
           }[]
         }
       >()
+      // IRR applies to double-scored regular batches AND training batches
+      // (both have every team member score the same items — see irr.ts).
+      const irrApplicable =
+        (batch.type === 'REGULAR' && batch.isDoubleScored) ||
+        batch.type === 'TRAINING'
       if (
-        batch.type === 'REGULAR' &&
-        batch.isDoubleScored &&
+        irrApplicable &&
         (batch.status === 'SCORING' ||
           batch.status === 'RECONCILING' ||
           batch.status === 'COMPLETE')

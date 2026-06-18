@@ -11,8 +11,11 @@ import { prisma } from '@/lib/db'
  * Per Amber's answer to Q2: display this to admins; there is no automatic
  * gate. Admins decide when to release Independent batches based on IRR.
  *
- * IRR is defined for REGULAR double-scored batches only: per-team comparison
- * of that team's two members across that team's assigned criteria.
+ * IRR is defined for two kinds of batch, both per-team comparison of that
+ * team's two members (exact-match, pre-reconciliation):
+ *   - REGULAR double-scored: across that team's assigned criteria.
+ *   - TRAINING: across ALL project rubric criteria (every member scores every
+ *     item against every criterion — see getExpectedReleaseDimensionIds).
  *
  * Single-scored regular batches have no IRR.
  */
@@ -84,12 +87,34 @@ export async function computeBatchIRRSummary(
   })
   if (!batch) return null
 
-  const isApplicableBatch = batch.type === 'REGULAR' && batch.isDoubleScored
+  const isTraining = batch.type === 'TRAINING'
+  const isDoubleScoredRegular = batch.type === 'REGULAR' && batch.isDoubleScored
+  const isApplicableBatch = isTraining || isDoubleScoredRegular
+
+  // TRAINING releases score EVERY project rubric criterion (not the team's
+  // assigned 2). Fetch the project's dimensions so we compare across all of
+  // them; double-scored regular keeps using each team's assigned dimensions.
+  const projectDimensions = isTraining
+    ? await prisma.rubricDimension.findMany({
+        where: { projectId: batch.projectId },
+        select: { id: true, label: true, sortOrder: true },
+        orderBy: { sortOrder: 'asc' },
+      })
+    : []
+
+  // The effective criterion set for a release: all project dims for TRAINING,
+  // otherwise the team's assigned dims.
+  const releaseDimensions = (
+    release: (typeof batch.teamReleases)[number]
+  ): { id: string; label: string; sortOrder: number }[] =>
+    isTraining
+      ? projectDimensions
+      : release.team.dimensions.map((dimension) => dimension.dimension)
 
   const applicableReleases = batch.teamReleases.filter((release) => {
     if (!isApplicableBatch) return false
     if (release.team.members.length !== 2) return false
-    return release.team.dimensions.length > 0
+    return releaseDimensions(release).length > 0
   })
 
   if (!isApplicableBatch) {
@@ -124,7 +149,7 @@ export async function computeBatchIRRSummary(
   const relevantDimensionIds = [
     ...new Set(
       applicableReleases.flatMap((release) =>
-        release.team.dimensions.map((dimension) => dimension.dimensionId)
+        releaseDimensions(release).map((dimension) => dimension.id)
       )
     ),
   ]
@@ -146,9 +171,7 @@ export async function computeBatchIRRSummary(
   })
 
   const teams = batch.teamReleases.map((release): TeamReleaseIRR => {
-    const dimensionSource = release.team.dimensions.map(
-      (dimension) => dimension.dimension
-    )
+    const dimensionSource = releaseDimensions(release)
     const userIds = release.team.members.map((member) => member.userId)
 
     if (
@@ -257,9 +280,7 @@ export async function computeBatchIRRSummary(
   // Batch-level per-criterion rollup across all team releases.
   const dimensionSortOrder = new Map<string, number>(
     batch.teamReleases
-      .flatMap((release) =>
-        release.team.dimensions.map((dimension) => dimension.dimension)
-      )
+      .flatMap((release) => releaseDimensions(release))
       .map((dimension) => [dimension.id, dimension.sortOrder])
   )
   const batchPerDim = new Map<
