@@ -146,6 +146,8 @@ export async function GET(request: NextRequest) {
       teamName: string
       batchName: string
       batchType: string
+      notes: string
+      timestamp: Date
       dimensionScores: Record<string, number>
     }
   >()
@@ -178,11 +180,17 @@ export async function GET(request: NextRequest) {
         teamName: teamByUserId.get(userId) || '',
         batchName: score.feedbackItem.batch?.name || '',
         batchType: score.feedbackItem.batch?.type || '',
+        notes: score.notes ?? '',
+        timestamp: score.scoredAt,
         dimensionScores: {},
       })
     }
     const row = rowMap.get(rowKey)!
     row.dimensionScores[score.dimension.key] = score.value
+    // Notes can live on any one of an item/user's per-dimension rows; keep the
+    // first non-empty. Timestamp = the most recent score for that item/user.
+    if (!row.notes && score.notes) row.notes = score.notes
+    if (score.scoredAt > row.timestamp) row.timestamp = score.scoredAt
   }
 
   // Build CSV — new output format: input columns + Score_ID, Evaluator_ID, criteria
@@ -209,6 +217,8 @@ export async function GET(request: NextRequest) {
     'Batch_Name',
     'Batch_Type',
     ...dimensionLabels,
+    'Notes',
+    'Timestamp',
   ]
 
   const csvRows = [headerRow.join(',')]
@@ -238,6 +248,8 @@ export async function GET(request: NextRequest) {
           ? String(row.dimensionScores[key])
           : ''
       ),
+      csvEscape(row.notes),
+      row.timestamp.toISOString(),
     ]
     csvRows.push(values.join(','))
   }
