@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Typecheck · Lint · Test
+    runs-on: ubuntu-latest
+    env:
+      # Unit tests never connect — a dummy URL lets modules that import
+      # @/lib/db construct the Prisma client, and lets `prisma generate` run.
+      DATABASE_URL: postgresql://test:test@localhost:5432/writing_evaluator_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Unit tests
+        run: npm test
+
+      # Non-blocking for now: the repo has pre-existing lint debt (and eslint
+      # currently scans the generated Prisma client). Re-enable as a hard gate
+      # after the lint-cleanup pass.
+      - name: Lint (non-blocking)
+        run: npm run lint
+        continue-on-error: true
