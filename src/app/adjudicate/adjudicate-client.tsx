@@ -15,6 +15,10 @@ import { Badge } from '@/components/ui/badge'
 import { Loader2, Gavel, CheckCircle, AlertTriangle } from 'lucide-react'
 import { AppShell } from '@/components/app-shell'
 import { getScoreColor, getSelectedScoreColor } from '@/lib/scoring-utils'
+import {
+  getOptimalFlag,
+  isAppropriateFeedbackDecision,
+} from '@/lib/optimal-indicator'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -54,6 +58,7 @@ interface EscalationItem {
     activityId: string | null
     conjunctionId: string | null
     displayOrder: number | null
+    optimal: string | null
   }
   dimension: Dimension
   escalatedBy: { id: string; name: string | null; email: string }
@@ -243,8 +248,27 @@ export function AdjudicateClient({ userName }: { userName: string }) {
                     {/* Student text + feedback (read-only context) */}
                     <div className="grid gap-3 md:grid-cols-2">
                       <div className="rounded-lg bg-content-student-bg p-3">
-                        <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                          Student Response
+                        <div className="mb-1 flex items-center justify-between gap-2">
+                          <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                            Student Response
+                          </div>
+                          {isAppropriateFeedbackDecision(item.dimension) &&
+                            (() => {
+                              const flag = getOptimalFlag(
+                                item.feedbackItem.optimal
+                              )
+                              if (!flag) return null
+                              const { Icon } = flag
+                              return (
+                                <Badge
+                                  variant="outline"
+                                  className={`${flag.className} shrink-0 transition-all duration-200`}
+                                >
+                                  <Icon />
+                                  {flag.label}
+                                </Badge>
+                              )
+                            })()}
                         </div>
                         <div className="whitespace-pre-wrap text-sm">
                           {item.feedbackItem.studentText}

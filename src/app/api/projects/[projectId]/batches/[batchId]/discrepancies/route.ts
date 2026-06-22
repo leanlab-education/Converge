@@ -133,6 +133,9 @@ export async function GET(
           activityId: true,
           conjunctionId: true,
           displayOrder: true,
+          // Quill ground-truth flag for the Appropriate Feedback Decision
+          // criterion — surfaced during reconciliation for that criterion.
+          optimal: true,
         },
       },
       user: { select: { id: true, name: true, email: true } },
@@ -233,6 +236,7 @@ export async function GET(
       activityId: string | null
       conjunctionId: string | null
       displayOrder: number | null
+      optimal: string | null
       coders: ItemCoder[]
       discrepancies: {
         dimensionId: string
@@ -280,6 +284,7 @@ export async function GET(
         feedbackItemId: fid,
         studentText: group.feedbackItem.studentText,
         feedbackText: group.feedbackItem.feedbackText,
+        optimal: group.feedbackItem.optimal,
         activityId: group.feedbackItem.activityId,
         conjunctionId: group.feedbackItem.conjunctionId,
         displayOrder: group.feedbackItem.displayOrder,

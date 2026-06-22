@@ -30,6 +30,10 @@ import {
   getScoreColor,
   getSelectedScoreColor,
 } from '@/lib/scoring-utils'
+import {
+  getOptimalFlag,
+  isAppropriateFeedbackDecision,
+} from '@/lib/optimal-indicator'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -77,6 +81,7 @@ interface DiscrepantItem {
   feedbackItemId: string
   studentText: string
   feedbackText: string
+  optimal: string | null
   activityId: string | null
   conjunctionId: string | null
   displayOrder: number | null
@@ -183,6 +188,20 @@ export function ReconcileClient({
 
   const currentItem = items[currentIndex] ?? null
   const currentState = currentItem ? itemStates[currentItem.feedbackItemId] : null
+
+  // Show the Quill "optimal" indicator only when this reconciliation involves
+  // the Appropriate Feedback Decision criterion (i.e. the pair was assigned it).
+  const showOptimalFlag = currentItem
+    ? currentItem.discrepancies.some((d) =>
+        isAppropriateFeedbackDecision({
+          key: d.dimensionKey,
+          label: d.dimensionLabel,
+        })
+      ) ||
+      currentItem.agreements.some((a) =>
+        isAppropriateFeedbackDecision({ label: a.dimensionLabel })
+      )
+    : false
 
   // A dimension is "done" if it has a final value OR has been escalated.
   // Escalated dimensions will be resolved by the adjudicator; the pair
@@ -549,7 +568,24 @@ export function ReconcileClient({
 
           <Card className="border-content-student-border bg-content-student-bg">
             <CardHeader>
-              <CardTitle className="text-content-student-text">Student Response</CardTitle>
+              <div className="flex items-center justify-between gap-3">
+                <CardTitle className="text-content-student-text">Student Response</CardTitle>
+                {showOptimalFlag &&
+                  (() => {
+                    const flag = getOptimalFlag(currentItem?.optimal)
+                    if (!flag) return null
+                    const { Icon } = flag
+                    return (
+                      <Badge
+                        variant="outline"
+                        className={`${flag.className} transition-all duration-200`}
+                      >
+                        <Icon />
+                        {flag.label}
+                      </Badge>
+                    )
+                  })()}
+              </div>
             </CardHeader>
             <CardContent>
               <div className="whitespace-pre-wrap text-sm leading-relaxed text-content-student-text/80">

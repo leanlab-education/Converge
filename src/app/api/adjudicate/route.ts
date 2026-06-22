@@ -58,6 +58,9 @@ export async function GET(_request: NextRequest) {
           activityId: true,
           conjunctionId: true,
           displayOrder: true,
+          // Quill ground-truth flag — shown to the adjudicator when the
+          // escalated criterion is Appropriate Feedback Decision.
+          optimal: true,
         },
       },
       dimension: {

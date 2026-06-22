@@ -166,6 +166,10 @@ export async function GET(request: NextRequest) {
       feedbackId: true,
       // teacherId intentionally excluded — blinded
       feedbackText: true,
+      // Quill's ground-truth flag (whether the response already meets the goal).
+      // Surfaced during scoring so annotators can judge the "Appropriate
+      // Feedback Decision" criterion. Not a blinded field.
+      optimal: true,
       batchId: true,
       displayOrder: true,
       createdAt: true,

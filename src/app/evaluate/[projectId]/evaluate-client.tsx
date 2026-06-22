@@ -38,6 +38,10 @@ import {
   getScoreColor,
   getSelectedScoreColor,
 } from '@/lib/scoring-utils'
+import {
+  getOptimalFlag,
+  isAppropriateFeedbackDecision,
+} from '@/lib/optimal-indicator'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -61,6 +65,7 @@ interface FeedbackItem {
   conjunctionId: string | null
   studentText: string
   feedbackText: string
+  optimal: string | null
   displayOrder: number | null
 }
 
@@ -637,6 +642,12 @@ export function EvaluateClient({
 
   const rubric = project.rubric
 
+  // The Quill "optimal" indicator is only relevant to the Appropriate Feedback
+  // Decision criterion, so only surface it to annotators actually assigned that
+  // criterion (rubric is already filtered to the annotator's assigned criteria;
+  // training batches and admins see all criteria, so it shows for them too).
+  const showOptimalFlag = rubric.some(isAppropriateFeedbackDecision)
+
   return (
     <AppShell defaultCollapsed>
       <div className="flex min-h-screen flex-col">
@@ -738,7 +749,24 @@ export function EvaluateClient({
 
           <Card className="border-content-student-border bg-content-student-bg">
             <CardHeader>
-              <CardTitle className="text-content-student-text">Student Response</CardTitle>
+              <div className="flex items-center justify-between gap-3">
+                <CardTitle className="text-content-student-text">Student Response</CardTitle>
+                {showOptimalFlag &&
+                  (() => {
+                    const flag = getOptimalFlag(currentItem?.optimal)
+                    if (!flag) return null
+                    const { Icon } = flag
+                    return (
+                      <Badge
+                        variant="outline"
+                        className={`${flag.className} transition-all duration-200`}
+                      >
+                        <Icon />
+                        {flag.label}
+                      </Badge>
+                    )
+                  })()}
+              </div>
             </CardHeader>
             <CardContent>
               <div className="whitespace-pre-wrap text-sm leading-relaxed text-content-student-text/80">
