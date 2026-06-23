@@ -170,8 +170,22 @@ export async function POST(
   let reconciledCount = 0
   const releaseUserIds = release.team.members.map((member) => member.userId)
 
+  // (item, dimension) pairs an adjudicator has already resolved are final — the
+  // pair must never overwrite them. The UI locks these, but enforce server-side
+  // too so a stale client can't clobber an adjudicator's decision.
+  const resolvedEscalations = await prisma.escalation.findMany({
+    where: { teamReleaseId: releaseId, resolvedAt: { not: null } },
+    select: { feedbackItemId: true, dimensionId: true },
+  })
+  const adjudicatedKeys = new Set(
+    resolvedEscalations.map((e) => `${e.feedbackItemId}::${e.dimensionId}`)
+  )
+
   for (const item of items) {
     for (const score of item.scores) {
+      if (adjudicatedKeys.has(`${item.feedbackItemId}::${score.dimensionId}`)) {
+        continue
+      }
       const originals = await prisma.score.findMany({
         where: {
           feedbackItemId: item.feedbackItemId,

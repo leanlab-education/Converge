@@ -187,6 +187,28 @@ export async function GET(
     })
   }
 
+  // Resolved escalations: the adjudicator has already made the final call on
+  // these (item, dimension) pairs. They surface as a LOCKED state so the pair
+  // can't overwrite an adjudicator's decision. (Withdrawn escalations are
+  // deleted, so resolvedAt != null reliably means "adjudicated".)
+  const resolvedEscalations = await prisma.escalation.findMany({
+    where: { batchId, teamReleaseId: releaseId, resolvedAt: { not: null } },
+    select: {
+      feedbackItemId: true,
+      dimensionId: true,
+      resolvedBy: { select: { id: true, name: true, email: true } },
+    },
+  })
+  const resolvedEscalationByKey = new Map<
+    string,
+    { resolvedBy: { id: string; name: string | null; email: string } | null }
+  >()
+  for (const esc of resolvedEscalations) {
+    resolvedEscalationByKey.set(`${esc.feedbackItemId}::${esc.dimensionId}`, {
+      resolvedBy: esc.resolvedBy,
+    })
+  }
+
   const groupMap = new Map<
     string,
     {
@@ -265,6 +287,10 @@ export async function GET(
           escalatedByName: string | null
           escalatedByEmail: string
         } | null
+        adjudication: {
+          resolvedByName: string | null
+          resolvedByEmail: string
+        } | null
       }[]
       agreements: {
         dimensionId: string
@@ -308,9 +334,9 @@ export async function GET(
 
     const [evaluatorA, evaluatorB] = group.evaluators
     if (evaluatorA.value !== evaluatorB.value) {
-      const escalation = escalationByKey.get(
-        `${group.feedbackItem.id}::${group.dimension.id}`
-      )
+      const groupKey = `${group.feedbackItem.id}::${group.dimension.id}`
+      const escalation = escalationByKey.get(groupKey)
+      const resolved = resolvedEscalationByKey.get(groupKey)
       item.discrepancies.push({
         dimensionId: group.dimension.id,
         dimensionLabel: group.dimension.label,
@@ -326,6 +352,12 @@ export async function GET(
               id: escalation.id,
               escalatedByName: escalation.escalatedBy.name,
               escalatedByEmail: escalation.escalatedBy.email,
+            }
+          : null,
+        adjudication: resolved
+          ? {
+              resolvedByName: resolved.resolvedBy?.name ?? null,
+              resolvedByEmail: resolved.resolvedBy?.email ?? '',
             }
           : null,
       })
@@ -347,17 +379,27 @@ export async function GET(
       return a.feedbackItemId.localeCompare(b.feedbackItemId)
     })
 
-  const reconciledCount =
+  const existingReconciledScores =
     ownerUserId == null
-      ? 0
-      : await prisma.score.count({
+      ? []
+      : await prisma.score.findMany({
           where: {
             feedbackItem: { batchId },
             userId: ownerUserId,
             dimensionId: { in: dimensionIds },
             isReconciled: true,
           },
+          select: {
+            feedbackItemId: true,
+            dimensionId: true,
+            value: true,
+            notes: true,
+          },
         })
+
+  const reconciledCount = existingReconciledScores.filter((r) =>
+    itemMap.has(r.feedbackItemId)
+  ).length
 
   const totalDiscrepancies = items.reduce(
     (sum, item) => sum + item.discrepancies.length,
@@ -368,6 +410,7 @@ export async function GET(
   return NextResponse.json({
     items,
     hasAdjudicator,
+    reconciledScores: existingReconciledScores,
     summary: {
       totalItems: itemMap.size,
       discrepantItems: items.length,

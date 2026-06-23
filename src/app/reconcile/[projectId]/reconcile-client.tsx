@@ -23,6 +23,7 @@ import {
   Scale,
   Flag,
   Undo2,
+  Gavel,
 } from 'lucide-react'
 import { AppShell } from '@/components/app-shell'
 import {
@@ -62,6 +63,12 @@ interface Discrepancy {
     escalatedByName: string | null
     escalatedByEmail: string
   } | null
+  // Set when the adjudicator has already resolved this criterion. The pair sees
+  // it locked with the adjudicator's final value — they cannot override it.
+  adjudication: {
+    resolvedByName: string | null
+    resolvedByEmail: string
+  } | null
 }
 
 interface Agreement {
@@ -90,9 +97,17 @@ interface DiscrepantItem {
   agreements: Agreement[]
 }
 
+interface ReconciledScore {
+  feedbackItemId: string
+  dimensionId: string
+  value: number
+  notes: string | null
+}
+
 interface DiscrepancyResponse {
   items: DiscrepantItem[]
   hasAdjudicator: boolean
+  reconciledScores: ReconciledScore[]
   summary: {
     totalItems: number
     discrepantItems: number
@@ -162,7 +177,14 @@ export function ReconcileClient({
         setSummary(data.summary)
         setHasAdjudicator(data.hasAdjudicator)
 
-        // Initialize state for each item - pre-fill agreed dimensions
+        // Build a lookup of existing reconciled scores so we can restore state
+        // on return visits without losing already-saved work.
+        const reconciledByKey = new Map<string, ReconciledScore>()
+        for (const r of data.reconciledScores ?? []) {
+          reconciledByKey.set(`${r.feedbackItemId}::${r.dimensionId}`, r)
+        }
+
+        // Initialize state for each item - pre-fill agreed + already-reconciled dimensions
         const states: Record<string, ItemReconcileState> = {}
         for (const item of data.items) {
           const scores: Record<string, number | null> = {}
@@ -170,11 +192,32 @@ export function ReconcileClient({
           for (const a of item.agreements) {
             scores[a.dimensionId] = a.value
           }
-          // Discrepant dimensions start empty
+          // Discrepant dimensions: restore existing reconciled value if present
           for (const d of item.discrepancies) {
-            scores[d.dimensionId] = null
+            const existing = reconciledByKey.get(
+              `${item.feedbackItemId}::${d.dimensionId}`
+            )
+            scores[d.dimensionId] = existing?.value ?? null
           }
-          states[item.feedbackItemId] = { scores, notes: '', saved: false }
+          // Restore notes from the first reconciled score that has them
+          const existingNotes =
+            item.discrepancies
+              .map((d) =>
+                reconciledByKey.get(`${item.feedbackItemId}::${d.dimensionId}`)
+              )
+              .find((r) => r?.notes)?.notes ?? ''
+          // Mark as already saved if every discrepancy is either escalated or
+          // has an existing reconciled score.
+          const alreadySaved = item.discrepancies.every(
+            (d) =>
+              d.escalation != null ||
+              reconciledByKey.has(`${item.feedbackItemId}::${d.dimensionId}`)
+          )
+          states[item.feedbackItemId] = {
+            scores,
+            notes: existingNotes,
+            saved: alreadySaved,
+          }
         }
         setItemStates(states)
       } catch (err) {
@@ -203,13 +246,15 @@ export function ReconcileClient({
       )
     : false
 
-  // A dimension is "done" if it has a final value OR has been escalated.
-  // Escalated dimensions will be resolved by the adjudicator; the pair
-  // can still save their progress on the rest of the item.
+  // A dimension is "done" if it has a final value, has been escalated (pending
+  // adjudication), or was already resolved by the adjudicator (locked). In all
+  // three cases the pair has no outstanding action on it.
   const allDiscrepanciesScored = currentItem
     ? currentItem.discrepancies.every(
         (d) =>
-          d.escalation != null || currentState?.scores[d.dimensionId] != null
+          d.escalation != null ||
+          d.adjudication != null ||
+          currentState?.scores[d.dimensionId] != null
       )
     : false
 
@@ -360,15 +405,16 @@ export function ReconcileClient({
 
     try {
       // Build scores array: all dimensions (agreed + resolved discrepancies).
-      // Escalated dimensions are intentionally excluded — the adjudicator
-      // will write their own reconciled Score row for those.
-      const escalatedDimIds = new Set(
+      // Escalated AND adjudicator-resolved dimensions are intentionally excluded
+      // — the adjudicator owns the reconciled Score row for those, and the pair
+      // must not overwrite it.
+      const lockedDimIds = new Set(
         currentItem.discrepancies
-          .filter((d) => d.escalation != null)
+          .filter((d) => d.escalation != null || d.adjudication != null)
           .map((d) => d.dimensionId)
       )
       const scores = Object.entries(currentState.scores)
-        .filter(([dimensionId, v]) => v != null && !escalatedDimIds.has(dimensionId))
+        .filter(([dimensionId, v]) => v != null && !lockedDimIds.has(dimensionId))
         .map(([dimensionId, value]) => ({ dimensionId, value: value! }))
 
       const res = await fetch(
@@ -626,6 +672,7 @@ export function ReconcileClient({
               {currentItem?.discrepancies.map((disc) => {
                 const scoreLabels = parseScoreLabels(disc.scoreLabelJson)
                 const finalValue = currentState?.scores[disc.dimensionId] ?? null
+                const isAdjudicated = disc.adjudication != null
                 const isEscalated = disc.escalation != null
                 const isEscalatingThis = escalatingDimId === disc.dimensionId
 
@@ -637,7 +684,9 @@ export function ReconcileClient({
                 return (
                   <div key={disc.dimensionId} className="flex flex-col gap-3">
                     <div className="flex items-center gap-2">
-                      {isEscalated ? (
+                      {isAdjudicated ? (
+                        <Gavel className="size-3.5 text-primary" />
+                      ) : isEscalated ? (
                         <Flag className="size-3.5 text-primary" />
                       ) : (
                         <AlertTriangle className="size-3.5 text-warning" />
@@ -645,7 +694,14 @@ export function ReconcileClient({
                       <Label className="text-sm font-semibold text-foreground">
                         {disc.dimensionLabel}
                       </Label>
-                      {isEscalated ? (
+                      {isAdjudicated ? (
+                        <Badge
+                          variant="outline"
+                          className="border-primary/30 bg-primary/10 text-[10px] text-primary"
+                        >
+                          Resolved by adjudicator
+                        </Badge>
+                      ) : isEscalated ? (
                         <Badge
                           variant="outline"
                           className="border-primary/30 bg-primary/10 text-[10px] text-primary"
@@ -701,8 +757,32 @@ export function ReconcileClient({
                       </div>
                     </div>
 
-                    {/* Final score selection OR escalated state */}
-                    {isEscalated ? (
+                    {/* Locked (adjudicator resolved) OR escalated OR picker */}
+                    {isAdjudicated ? (
+                      <div className="flex items-center justify-between gap-3 rounded-lg border border-primary/20 bg-primary/5 px-3 py-2.5">
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                          <Gavel className="size-3.5 shrink-0 text-primary" />
+                          <span>
+                            Final score set by the adjudicator
+                            {disc.adjudication?.resolvedByName
+                              ? ` (${disc.adjudication.resolvedByName})`
+                              : ''}
+                            . This decision is final.
+                          </span>
+                        </div>
+                        {finalValue != null && (
+                          <span
+                            className={`inline-flex shrink-0 rounded-lg border-2 px-2.5 py-1 text-xs font-medium ${getSelectedScoreColor(
+                              finalValue,
+                              disc.scaleMin,
+                              disc.scaleMax
+                            )}`}
+                          >
+                            {scoreLabels[finalValue]?.label ?? finalValue}
+                          </span>
+                        )}
+                      </div>
+                    ) : isEscalated ? (
                       <div className="flex items-center justify-between rounded-lg bg-primary/5 px-3 py-2 text-xs">
                         <span className="text-muted-foreground">
                           Waiting on adjudicator to resolve.
