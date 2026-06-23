@@ -364,8 +364,16 @@ export function BatchCreator({
                   ? 'bg-score-high-bg text-score-high-text'
                   : 'bg-muted text-muted-foreground'
             const irrSummary = batch.irrSummary
-            const avgIrr = irrSummary?.averageAgreementPct ?? null
-            const lowIrr = irrSummary?.lowestAgreementPct ?? null
+            // At-a-glance IRR shows the spread ACROSS CRITERIA — highest vs
+            // lowest criterion agreement — rather than the cross-team average,
+            // which read as a confusing single "high" (Amber, 2026-06-23).
+            const criterionPcts = (irrSummary?.perDimension ?? [])
+              .map((d) => d.agreementPct)
+              .filter((pct): pct is number => pct != null)
+            const highIrr =
+              criterionPcts.length > 0 ? Math.max(...criterionPcts) : null
+            const lowIrr =
+              criterionPcts.length > 0 ? Math.min(...criterionPcts) : null
             const isIrrEligible =
               (batch.type === 'REGULAR' && batch.isDoubleScored) ||
               batch.type === 'TRAINING'
@@ -427,18 +435,29 @@ export function BatchCreator({
                     </Badge>
                   </div>
 
-                  <div className="text-center">
-                    {hasIrr ? (
-                      <>
-                        <div className={cn('text-sm font-bold leading-tight', getIrrColorClass(avgIrr))}>
-                          {avgIrr != null ? `${avgIrr}%` : '—'}
+                  <div
+                    className="text-center"
+                    title={
+                      highIrr != null
+                        ? 'Highest vs lowest exact-match agreement across this batch’s criteria'
+                        : undefined
+                    }
+                  >
+                    {hasIrr && highIrr != null ? (
+                      highIrr === lowIrr ? (
+                        <div className={cn('text-sm font-bold leading-tight', getIrrColorClass(highIrr))}>
+                          {highIrr}%
                         </div>
-                        {lowIrr != null && (
+                      ) : (
+                        <>
+                          <div className={cn('text-sm font-bold leading-tight', getIrrColorClass(highIrr))}>
+                            high {highIrr}%
+                          </div>
                           <div className={cn('text-[10px] leading-tight', getIrrColorClass(lowIrr))}>
                             low {lowIrr}%
                           </div>
-                        )}
-                      </>
+                        </>
+                      )
                     ) : (
                       <span className="text-sm text-muted-foreground/30">—</span>
                     )}
