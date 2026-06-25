@@ -42,6 +42,7 @@ import {
   getOptimalFlag,
   isAppropriateFeedbackDecision,
 } from '@/lib/optimal-indicator'
+import { QUILL_FEEDBACK_RUBRIC_V11 } from '@/lib/rubric-templates'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -825,7 +826,7 @@ export function EvaluateClient({
                     <div className="flex-1 overflow-y-auto px-6 py-5">
                       <div className="mb-5 rounded-xl border bg-muted/30 p-4 text-sm">
                         <div className="font-medium text-foreground">
-                          Rubric V10, April 2026
+                          Rubric {QUILL_FEEDBACK_RUBRIC_V11.version}
                         </div>
                         <div className="mt-2 space-y-1 text-muted-foreground">
                           <p>Student work:</p>
