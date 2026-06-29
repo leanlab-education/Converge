@@ -99,7 +99,7 @@ export async function GET(request: NextRequest) {
           feedbackId: true,
           batchId: true,
           batch: {
-            select: { name: true, type: true },
+            select: { name: true, type: true, isDoubleScored: true },
           },
         },
       },
@@ -159,6 +159,7 @@ export async function GET(request: NextRequest) {
       teamName: string
       batchName: string
       batchType: string
+      doubleScored: boolean
       notes: string
       timestamp: Date
       dimensionScores: Record<string, number>
@@ -193,6 +194,7 @@ export async function GET(request: NextRequest) {
         teamName: teamByUserId.get(userId) || '',
         batchName: score.feedbackItem.batch?.name || '',
         batchType: score.feedbackItem.batch?.type || '',
+        doubleScored: score.feedbackItem.batch?.isDoubleScored ?? false,
         notes: score.notes ?? '',
         timestamp: score.scoredAt,
         dimensionScores: {},
@@ -229,6 +231,7 @@ export async function GET(request: NextRequest) {
     'Team_Name',
     'Batch_Name',
     'Batch_Type',
+    'Double_Scored',
     ...dimensionLabels,
     'Notes',
     'Timestamp',
@@ -256,6 +259,7 @@ export async function GET(request: NextRequest) {
       csvEscape(row.teamName),
       csvEscape(row.batchName),
       csvEscape(row.batchType),
+      row.doubleScored ? 'Yes' : 'No',
       ...dimensionKeys.map((key) =>
         row.dimensionScores[key] !== undefined
           ? String(row.dimensionScores[key])
