@@ -172,8 +172,16 @@ export async function GET(request: NextRequest) {
       scoreCounter++
       const batchId = score.feedbackItem.batchId
       const userId = score.user.id
+      // Surface the symmetric "Scorer A/B" labels instead of the internal
+      // PRIMARY/DOUBLE enum — the two scorers in a double-scored pair score
+      // independently, so the names shouldn't imply a sequence or hierarchy.
+      const rawRole = batchId ? roleMap.get(`${batchId}::${userId}`) || '' : ''
       const scoringRole =
-        batchId ? roleMap.get(`${batchId}::${userId}`) || '' : ''
+        rawRole === 'PRIMARY'
+          ? 'Scorer A'
+          : rawRole === 'DOUBLE'
+            ? 'Scorer B'
+            : rawRole
 
       rowMap.set(rowKey, {
         scoreId: `S${String(scoreCounter).padStart(3, '0')}`,
