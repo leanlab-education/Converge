@@ -1,6 +1,7 @@
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { canAdminProject } from '@/lib/authorization'
+import { BATCH_LOCKED_MESSAGE } from '@/lib/reconciliation-access'
 import { maybeAdvanceReleaseAfterScore } from '@/lib/reconciliation'
 import { NextRequest, NextResponse } from 'next/server'
 
@@ -117,7 +118,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Batch not found' }, { status: 404 })
     }
     if (batch.isLocked) {
-      return NextResponse.json({ error: 'This batch has been locked by an admin and can no longer be edited.' }, { status: 423 })
+      return NextResponse.json({ error: BATCH_LOCKED_MESSAGE }, { status: 423 })
     }
     if (batch.isHidden && !isProjectAdmin) {
       return NextResponse.json({ error: 'Scoring is not open for this batch' }, { status: 403 })
@@ -264,7 +265,7 @@ export async function PUT(request: Request) {
       return NextResponse.json({ error: 'Batch not found' }, { status: 404 })
     }
     if (batch.isLocked) {
-      return NextResponse.json({ error: 'This batch has been locked by an admin and can no longer be edited.' }, { status: 423 })
+      return NextResponse.json({ error: BATCH_LOCKED_MESSAGE }, { status: 423 })
     }
     if (batch.isHidden && !isPutAdmin) {
       return NextResponse.json({ error: 'Scoring is not open for this batch' }, { status: 403 })

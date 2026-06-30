@@ -1,6 +1,7 @@
 import { auth } from '@/lib/auth'
 import { canAdminProject } from '@/lib/authorization'
 import { prisma } from '@/lib/db'
+import { evaluateReconciliationAccess } from '@/lib/reconciliation-access'
 import { NextRequest, NextResponse } from 'next/server'
 
 // POST /api/projects/[projectId]/batches/[batchId]/escalate
@@ -60,18 +61,12 @@ export async function POST(
     return NextResponse.json({ error: 'Release not found' }, { status: 404 })
   }
 
-  if (release.batch.isLocked) {
-    return NextResponse.json(
-      { error: 'This batch has been locked by an admin and can no longer be edited.' },
-      { status: 423 }
-    )
-  }
-
-  if (release.status !== 'RECONCILING' && release.status !== 'COMPLETE') {
-    return NextResponse.json(
-      { error: 'Release is not in a reconcilable status to escalate' },
-      { status: 400 }
-    )
+  const access = evaluateReconciliationAccess({
+    isLocked: release.batch.isLocked,
+    status: release.status,
+  })
+  if (!access.ok) {
+    return NextResponse.json({ error: access.error }, { status: access.httpStatus })
   }
 
   if (!release.adjudicatorId) {

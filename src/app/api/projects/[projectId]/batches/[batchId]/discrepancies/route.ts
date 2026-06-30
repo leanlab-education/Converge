@@ -1,6 +1,7 @@
 import { auth } from '@/lib/auth'
 import { canAdminProject } from '@/lib/authorization'
 import { prisma } from '@/lib/db'
+import { isReconcilableStatus } from '@/lib/reconciliation-access'
 import {
   getExpectedReleaseDimensionIds,
   getReleaseOwnerUserId,
@@ -89,7 +90,8 @@ export async function GET(
 
   // Load discrepancies while actively reconciling OR after auto-completion, so
   // the pair can review/edit already-reconciled items until the batch is locked.
-  if (release.status !== 'RECONCILING' && release.status !== 'COMPLETE') {
+  // (A locked batch still loads read-only, so don't block the GET on lock.)
+  if (!isReconcilableStatus(release.status)) {
     return NextResponse.json(
       { error: 'Release is not in a reconcilable status' },
       { status: 400 }

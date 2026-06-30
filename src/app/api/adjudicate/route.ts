@@ -1,6 +1,7 @@
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { isGlobalAdmin, getAdminProjectIds } from '@/lib/authorization'
+import { evaluateReconciliationAccess } from '@/lib/reconciliation-access'
 import { maybeCompleteReleaseReconciliation } from '@/lib/reconciliation'
 import { getReleaseOwnerUserId } from '@/lib/team-batch-releases'
 import { NextRequest, NextResponse } from 'next/server'
@@ -246,20 +247,12 @@ export async function POST(request: NextRequest) {
         { status: 403 }
       )
     }
-    if (esc.batch.isLocked) {
-      return NextResponse.json(
-        { error: 'This batch has been locked by an admin and can no longer be edited.' },
-        { status: 423 }
-      )
-    }
-    if (
-      esc.teamRelease.status !== 'RECONCILING' &&
-      esc.teamRelease.status !== 'COMPLETE'
-    ) {
-      return NextResponse.json(
-        { error: 'Release is not in a reconcilable status' },
-        { status: 400 }
-      )
+    const access = evaluateReconciliationAccess({
+      isLocked: esc.batch.isLocked,
+      status: esc.teamRelease.status,
+    })
+    if (!access.ok) {
+      return NextResponse.json({ error: access.error }, { status: access.httpStatus })
     }
   }
 
