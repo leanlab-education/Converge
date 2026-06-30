@@ -4,7 +4,7 @@ import Link from 'next/link'
 import { useEffect, useMemo, useState } from 'react'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { ChevronRight, Eye, EyeOff, Loader2, Plus } from 'lucide-react'
+import { ChevronRight, Eye, EyeOff, Loader2, Lock, LockOpen, Plus } from 'lucide-react'
 import { batchStatusColors, batchStatusLabels } from '@/lib/status-colors'
 import { cn } from '@/lib/utils'
 import { TeamAvatar, UserAvatar } from '@/components/user-avatar'
@@ -69,6 +69,8 @@ interface BatchRow {
   isDoubleScored: boolean
   canEditBatchType?: boolean
   isHidden?: boolean
+  isLocked?: boolean
+  lockedAt?: string | null
   ranges: BatchRangeRow[]
   teamReleases: TeamReleaseRow[]
 }
@@ -182,6 +184,33 @@ export function BatchCreator({
       setLocalBatches(previousBatches)
       console.error('Failed to update batch type:', error)
       alert('Something went wrong while updating the batch type.')
+    }
+  }
+
+  async function handleToggleLock(batchId: string, lock: boolean) {
+    if (
+      lock &&
+      !confirm(
+        'Lock this batch? Annotators and adjudicators will no longer be able to change any scores or reconciliations. You can unlock it again later.'
+      )
+    ) {
+      return
+    }
+    try {
+      const response = await fetch(`/api/projects/${projectId}/batches/${batchId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isLocked: lock }),
+      })
+      if (response.ok) {
+        await onBatchesChange({ silent: true })
+      } else {
+        const payload = await response.json().catch(() => null)
+        alert(payload?.error || 'Failed to update batch lock state')
+      }
+    } catch (error) {
+      console.error('Failed to update batch lock state:', error)
+      alert('Something went wrong while updating the batch lock state.')
     }
   }
 
@@ -351,6 +380,7 @@ export function BatchCreator({
           {filteredBatches.map((batch, index) => {
             const isExpanded = expandedBatches.has(batch.id)
             const isComplete = batch.status === 'COMPLETE'
+            const isLocked = batch.isLocked ?? false
             const assignmentLabel =
               batch.type === 'TRAINING'
                 ? 'Training'
@@ -429,10 +459,18 @@ export function BatchCreator({
                     </Badge>
                   </div>
 
-                  <div>
+                  <div className="flex items-center gap-1.5">
                     <Badge className={cn(batchStatusColors[batch.status] || '', 'text-[10px]')}>
                       {batchStatusLabels[batch.status] || batch.status}
                     </Badge>
+                    {isLocked && (
+                      <span
+                        className="inline-flex items-center text-muted-foreground"
+                        title="Locked — scores frozen"
+                      >
+                        <Lock className="size-3" />
+                      </span>
+                    )}
                   </div>
 
                   <div
@@ -536,6 +574,42 @@ export function BatchCreator({
                           </Button>
                         )}
                       </div>
+                    </div>
+
+                    {/* Lock control — freeze all scores/reconciliations once the
+                        batch is finalized. Reversible. */}
+                    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-background px-3 py-2.5">
+                      <div className="min-w-0">
+                        <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                          Lock
+                        </p>
+                        <p className="text-[11px] text-muted-foreground">
+                          {isLocked
+                            ? 'Locked — annotators and adjudicators cannot change any scores.'
+                            : 'Lock to freeze all scores and reconciliations once this batch is final.'}
+                        </p>
+                      </div>
+                      {isLocked ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-8 rounded-lg text-xs"
+                          onClick={() => handleToggleLock(batch.id, false)}
+                        >
+                          <LockOpen className="size-3.5" />
+                          Unlock batch
+                        </Button>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-8 rounded-lg text-xs"
+                          onClick={() => handleToggleLock(batch.id, true)}
+                        >
+                          <Lock className="size-3.5" />
+                          Lock batch
+                        </Button>
+                      )}
                     </div>
 
                     {batch.canEditBatchType && (

@@ -57,6 +57,7 @@ export async function POST(
           projectId: true,
           type: true,
           isDoubleScored: true,
+          isLocked: true,
         },
       },
       team: {
@@ -81,9 +82,20 @@ export async function POST(
     return NextResponse.json({ error: 'Release not found' }, { status: 404 })
   }
 
-  if (release.status !== 'RECONCILING') {
+  // Once an admin locks the batch, nothing can change — final scores are frozen.
+  if (release.batch.isLocked) {
     return NextResponse.json(
-      { error: 'Release must be in RECONCILING status' },
+      { error: 'This batch has been locked by an admin and can no longer be edited.' },
+      { status: 423 }
+    )
+  }
+
+  // Reconciliation edits are allowed while the release is actively RECONCILING
+  // OR after it auto-completed (COMPLETE) — so a pair can correct a final score
+  // they already agreed on, until the batch is locked. (Amber 2026-06-30)
+  if (release.status !== 'RECONCILING' && release.status !== 'COMPLETE') {
+    return NextResponse.json(
+      { error: 'Release is not in a reconcilable status' },
       { status: 400 }
     )
   }

@@ -93,7 +93,7 @@ export async function POST(request: Request) {
     const [batch, assignment] = await Promise.all([
       prisma.batch.findUnique({
         where: { id: feedbackItem.batchId },
-        select: { status: true, isHidden: true },
+        select: { status: true, isHidden: true, isLocked: true },
       }),
       prisma.batchAssignment.findFirst({
         where: {
@@ -115,6 +115,9 @@ export async function POST(request: Request) {
     ])
     if (!batch) {
       return NextResponse.json({ error: 'Batch not found' }, { status: 404 })
+    }
+    if (batch.isLocked) {
+      return NextResponse.json({ error: 'This batch has been locked by an admin and can no longer be edited.' }, { status: 423 })
     }
     if (batch.isHidden && !isProjectAdmin) {
       return NextResponse.json({ error: 'Scoring is not open for this batch' }, { status: 403 })
@@ -237,7 +240,7 @@ export async function PUT(request: Request) {
     const [batch, assignment] = await Promise.all([
       prisma.batch.findUnique({
         where: { id: feedbackItem.batchId },
-        select: { status: true, isHidden: true },
+        select: { status: true, isHidden: true, isLocked: true },
       }),
       prisma.batchAssignment.findFirst({
         where: {
@@ -259,6 +262,9 @@ export async function PUT(request: Request) {
     ])
     if (!batch) {
       return NextResponse.json({ error: 'Batch not found' }, { status: 404 })
+    }
+    if (batch.isLocked) {
+      return NextResponse.json({ error: 'This batch has been locked by an admin and can no longer be edited.' }, { status: 423 })
     }
     if (batch.isHidden && !isPutAdmin) {
       return NextResponse.json({ error: 'Scoring is not open for this batch' }, { status: 403 })

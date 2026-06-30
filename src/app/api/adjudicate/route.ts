@@ -212,7 +212,7 @@ export async function POST(request: NextRequest) {
   const escalations = await prisma.escalation.findMany({
     where: { id: { in: ids }, resolvedAt: null },
     include: {
-      batch: { select: { id: true, projectId: true } },
+      batch: { select: { id: true, projectId: true, isLocked: true } },
       teamRelease: {
         include: {
           team: {
@@ -246,9 +246,18 @@ export async function POST(request: NextRequest) {
         { status: 403 }
       )
     }
-    if (esc.teamRelease.status !== 'RECONCILING') {
+    if (esc.batch.isLocked) {
       return NextResponse.json(
-        { error: 'Release is not in RECONCILING status' },
+        { error: 'This batch has been locked by an admin and can no longer be edited.' },
+        { status: 423 }
+      )
+    }
+    if (
+      esc.teamRelease.status !== 'RECONCILING' &&
+      esc.teamRelease.status !== 'COMPLETE'
+    ) {
+      return NextResponse.json(
+        { error: 'Release is not in a reconcilable status' },
         { status: 400 }
       )
     }

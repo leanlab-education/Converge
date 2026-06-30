@@ -86,10 +86,19 @@ export default async function ProjectPage({
   })
 
   // --- Reconciliation: discrepancies to resolve with your own partner ---
-  const reconcileTasks = await Promise.all(
-    batchAssignments
-      .filter((ba) => ba.teamRelease?.status === 'RECONCILING')
-      .map(async (ba) => {
+  // Includes releases actively RECONCILING, plus ones that have auto-completed
+  // but whose batch is still unlocked — so the pair can revisit and correct a
+  // final score until an admin locks the batch (Amber 2026-06-30). Completed
+  // releases only surface if they actually had discrepancies to reconcile.
+  const reconcileCandidates = batchAssignments.filter((ba) => {
+    const status = ba.teamRelease?.status
+    if (status === 'RECONCILING') return true
+    if (status === 'COMPLETE' && !ba.batch.isLocked) return true
+    return false
+  })
+  const reconcileTasks = (
+    await Promise.all(
+      reconcileCandidates.map(async (ba) => {
         const release = ba.teamRelease!
         const stats = await computeReleaseDiscrepancyStats({
           batchId: ba.batch.id,
@@ -98,11 +107,17 @@ export default async function ProjectPage({
           memberUserIds: release.team.members.map((m) => m.userId),
           teamDimensionIds: release.team.dimensions.map((d) => d.dimensionId),
         })
+        // A completed release with no discrepancies had nothing to reconcile —
+        // don't clutter the list with a non-actionable "edit" entry.
+        if (release.status === 'COMPLETE' && stats.discrepancyCount === 0) {
+          return null
+        }
         const partner = release.team.members.find((m) => m.userId !== userId)?.user ?? null
         return {
           releaseId: release.id,
           batchId: ba.batch.id,
           batchName: ba.batch.name,
+          status: release.status,
           criteria: release.team.dimensions.map((d) => d.dimension.label),
           partnerName: partner
             ? displayAnnotatorName(partner.id, partner.name, usePseudonyms)
@@ -111,7 +126,8 @@ export default async function ProjectPage({
           reconciledCount: stats.reconciledCount,
         }
       })
-  )
+    )
+  ).filter((t): t is NonNullable<typeof t> => t !== null)
 
   // --- Adjudication: items escalated to you for another group in this project ---
   const myEscalations = await prisma.escalation.findMany({

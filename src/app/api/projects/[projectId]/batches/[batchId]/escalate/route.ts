@@ -51,7 +51,7 @@ export async function POST(
     where: { id: releaseId },
     include: {
       batch: {
-        select: { projectId: true },
+        select: { projectId: true, isLocked: true },
       },
     },
   })
@@ -60,9 +60,16 @@ export async function POST(
     return NextResponse.json({ error: 'Release not found' }, { status: 404 })
   }
 
-  if (release.status !== 'RECONCILING') {
+  if (release.batch.isLocked) {
     return NextResponse.json(
-      { error: 'Release must be in RECONCILING status to escalate' },
+      { error: 'This batch has been locked by an admin and can no longer be edited.' },
+      { status: 423 }
+    )
+  }
+
+  if (release.status !== 'RECONCILING' && release.status !== 'COMPLETE') {
+    return NextResponse.json(
+      { error: 'Release is not in a reconcilable status to escalate' },
       { status: 400 }
     )
   }

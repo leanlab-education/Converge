@@ -28,6 +28,9 @@ interface ReconcileTask {
   releaseId: string
   batchId: string
   batchName: string
+  // 'RECONCILING' = action needed; 'COMPLETE' = already reconciled, editable
+  // until an admin locks the batch.
+  status: string
   criteria: string[]
   partnerName: string | null
   discrepancyCount: number
@@ -67,7 +70,12 @@ export function EvaluatorProjectPage({
   const totalItems = batches.reduce((sum, b) => sum + b.itemCount, 0)
   const totalScored = batches.reduce((sum, b) => sum + b.scoredCount, 0)
   const overallPct = totalItems > 0 ? Math.round((totalScored / totalItems) * 100) : 0
-  const reconciliationCount = reconcileTasks.length + adjudicateTasks.length
+  // Only releases still actively reconciling count as pending work; completed
+  // (editable) ones are shown but don't drive the "to do" badge/banner.
+  const pendingReconcileCount = reconcileTasks.filter(
+    (t) => t.status === 'RECONCILING'
+  ).length
+  const reconciliationCount = pendingReconcileCount + adjudicateTasks.length
 
   return (
     <AppShell
@@ -116,7 +124,7 @@ export function EvaluatorProjectPage({
                   <span className="text-sm font-medium text-foreground">
                     You have{' '}
                     {[
-                      reconcileTasks.length > 0 ? `${reconcileTasks.length} to reconcile` : null,
+                      pendingReconcileCount > 0 ? `${pendingReconcileCount} to reconcile` : null,
                       adjudicateTasks.length > 0 ? `${adjudicateTasks.length} to adjudicate` : null,
                     ]
                       .filter(Boolean)
@@ -241,7 +249,9 @@ export function EvaluatorProjectPage({
                 />
               ) : (
                 <div className="space-y-3">
-                  {reconcileTasks.map((task) => (
+                  {reconcileTasks.map((task) => {
+                    const isReconciled = task.status === 'COMPLETE'
+                    return (
                     <Card
                       key={task.releaseId}
                       className="transition-all duration-200 hover:shadow-sm hover:ring-1 hover:ring-primary/10"
@@ -249,9 +259,15 @@ export function EvaluatorProjectPage({
                       <CardHeader className="pb-2">
                         <div className="flex items-start justify-between gap-2">
                           <CardTitle className="text-base">{task.batchName}</CardTitle>
-                          <Badge variant="outline" className="bg-status-reconciliation-bg text-status-reconciliation-text">
-                            Reconciling
-                          </Badge>
+                          {isReconciled ? (
+                            <Badge variant="outline" className="bg-status-complete-bg text-status-complete-text">
+                              Reconciled
+                            </Badge>
+                          ) : (
+                            <Badge variant="outline" className="bg-status-reconciliation-bg text-status-reconciliation-text">
+                              Reconciling
+                            </Badge>
+                          )}
                         </div>
                         <CardDescription>
                           {task.partnerName ? `with ${task.partnerName}` : 'Double-scored'}
@@ -261,23 +277,27 @@ export function EvaluatorProjectPage({
                         <p className="mb-3 text-xs text-muted-foreground">{task.criteria.join(' · ')}</p>
                         <div className="flex items-center justify-between gap-3">
                           <span className="text-sm text-muted-foreground">
-                            {task.reconciledCount} of {task.discrepancyCount} resolved
+                            {isReconciled
+                              ? `All ${task.discrepancyCount} resolved`
+                              : `${task.reconciledCount} of ${task.discrepancyCount} resolved`}
                           </span>
                           <Button
                             size="sm"
+                            variant={isReconciled ? 'outline' : 'default'}
                             onClick={() =>
                               router.push(
                                 `/reconcile/${project.id}?batchId=${task.batchId}&releaseId=${task.releaseId}`
                               )
                             }
                           >
-                            Reconcile
+                            {isReconciled ? 'Review / Edit' : 'Reconcile'}
                             <ArrowRight className="size-3.5" />
                           </Button>
                         </div>
                       </CardContent>
                     </Card>
-                  ))}
+                    )
+                  })}
                 </div>
               )
             ) : adjudicateTasks.length === 0 ? (

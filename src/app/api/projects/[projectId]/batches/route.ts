@@ -304,6 +304,8 @@ export async function GET(
         size: batch.size,
         sortOrder: batch.sortOrder,
         isHidden: batch.isHidden,
+        isLocked: batch.isLocked,
+        lockedAt: batch.lockedAt,
         createdAt: batch.createdAt,
         itemCount: batch._count.feedbackItems,
         progressPct,

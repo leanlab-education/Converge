@@ -47,6 +47,7 @@ export async function GET(
           projectId: true,
           type: true,
           isDoubleScored: true,
+          isLocked: true,
         },
       },
       team: {
@@ -86,9 +87,11 @@ export async function GET(
     return NextResponse.json({ error: 'Release not found' }, { status: 404 })
   }
 
-  if (release.status !== 'RECONCILING') {
+  // Load discrepancies while actively reconciling OR after auto-completion, so
+  // the pair can review/edit already-reconciled items until the batch is locked.
+  if (release.status !== 'RECONCILING' && release.status !== 'COMPLETE') {
     return NextResponse.json(
-      { error: 'Release must be in RECONCILING status' },
+      { error: 'Release is not in a reconcilable status' },
       { status: 400 }
     )
   }
@@ -410,6 +413,8 @@ export async function GET(
   return NextResponse.json({
     items,
     hasAdjudicator,
+    isLocked: release.batch.isLocked,
+    releaseStatus: release.status,
     reconciledScores: existingReconciledScores,
     summary: {
       totalItems: itemMap.size,

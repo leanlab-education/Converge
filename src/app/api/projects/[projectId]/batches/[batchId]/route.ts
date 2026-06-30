@@ -24,22 +24,24 @@ export async function PATCH(
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
   const body = await request.json()
-  const { status, isHidden, type, isDoubleScored } = body as {
+  const { status, isHidden, type, isDoubleScored, isLocked } = body as {
     status?: string
     isHidden?: boolean
     type?: 'REGULAR' | 'TRAINING'
     isDoubleScored?: boolean
+    isLocked?: boolean
   }
 
   if (
     status === undefined &&
     isHidden === undefined &&
     type === undefined &&
-    isDoubleScored === undefined
+    isDoubleScored === undefined &&
+    isLocked === undefined
   ) {
     return NextResponse.json(
       {
-        error: 'status, isHidden, type, or isDoubleScored is required',
+        error: 'status, isHidden, type, isDoubleScored, or isLocked is required',
       },
       { status: 400 }
     )
@@ -101,6 +103,13 @@ export async function PATCH(
     where: { id: batchId },
     data: {
       ...(isHidden !== undefined ? { isHidden } : {}),
+      ...(isLocked !== undefined
+        ? {
+            isLocked,
+            lockedAt: isLocked ? new Date() : null,
+            lockedById: isLocked ? session.user.id : null,
+          }
+        : {}),
       ...(modeIsChanging
         ? {
             type: nextType,

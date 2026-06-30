@@ -212,6 +212,9 @@ model Batch {
   isAssigned     Boolean     @default(false)  // Locked after first evaluator assignment
   sortOrder      Int         @default(0)
   isHidden       Boolean     @default(false)  // Hide from annotators (e.g. release Independent batches only after Double-Scored IRR passes)
+  isLocked       Boolean     @default(false)  // Admin freeze: once set, no scores/reconciliations/adjudications can change. Separate from COMPLETE (which only means "all discrepancies resolved").
+  lockedAt       DateTime?                    // When the batch was locked
+  lockedById     String?                      // Admin who locked it (scalar; no nav relation needed)
   createdAt      DateTime    @default(now())
 
   project       Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)

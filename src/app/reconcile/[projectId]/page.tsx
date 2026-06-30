@@ -28,11 +28,14 @@ export default async function ReconcilePage({
     },
   })
 
+  // Allow entering while actively reconciling OR after the release auto-completed
+  // (so the pair can revisit and correct a final score). Writes are still gated
+  // server-side by the batch lock; the client renders read-only when locked.
   if (
     !release ||
     release.batchId !== batchId ||
     release.batch.projectId !== projectId ||
-    release.status !== 'RECONCILING'
+    (release.status !== 'RECONCILING' && release.status !== 'COMPLETE')
   ) {
     redirect('/')
   }

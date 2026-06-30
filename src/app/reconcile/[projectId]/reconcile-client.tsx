@@ -14,6 +14,14 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import {
   ChevronLeft,
   ChevronRight,
   CheckCircle,
@@ -24,6 +32,8 @@ import {
   Flag,
   Undo2,
   Gavel,
+  Lock,
+  Pencil,
 } from 'lucide-react'
 import { AppShell } from '@/components/app-shell'
 import {
@@ -107,6 +117,8 @@ interface ReconciledScore {
 interface DiscrepancyResponse {
   items: DiscrepantItem[]
   hasAdjudicator: boolean
+  isLocked: boolean
+  releaseStatus: string
   reconciledScores: ReconciledScore[]
   summary: {
     totalItems: number
@@ -158,11 +170,21 @@ export function ReconcileClient({
   const [items, setItems] = useState<DiscrepantItem[]>([])
   const [summary, setSummary] = useState<DiscrepancyResponse['summary'] | null>(null)
   const [hasAdjudicator, setHasAdjudicator] = useState(false)
+  const [isLocked, setIsLocked] = useState(false)
   const [currentIndex, setCurrentIndex] = useState(0)
   const [itemStates, setItemStates] = useState<Record<string, ItemReconcileState>>({})
   const [saving, setSaving] = useState(false)
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [escalatingDimId, setEscalatingDimId] = useState<string | null>(null)
+  // When the pair re-opens a fully-reconciled batch to correct a score, they
+  // bypass the "all done" summary screen via this flag.
+  const [reviewMode, setReviewMode] = useState(false)
+  // A pending edit to an already-saved item, awaiting confirmation. Holds the
+  // score change so we can apply it once the user confirms the warning.
+  const [pendingEdit, setPendingEdit] = useState<{
+    dimensionId: string
+    value: number
+  } | null>(null)
 
   // Fetch discrepancies on mount
   useEffect(() => {
@@ -176,6 +198,7 @@ export function ReconcileClient({
         setItems(data.items)
         setSummary(data.summary)
         setHasAdjudicator(data.hasAdjudicator)
+        setIsLocked(data.isLocked)
 
         // Build a lookup of existing reconciled scores so we can restore state
         // on return visits without losing already-saved work.
@@ -260,7 +283,10 @@ export function ReconcileClient({
 
   const resolvedCount = Object.values(itemStates).filter((s) => s.saved).length
 
-  const handleFinalScoreChange = useCallback(
+  // Apply a final-score change. Setting `saved: false` re-opens the item so the
+  // "Save & Continue" button re-enables — this is how an edit to an already-
+  // reconciled item gets persisted.
+  const applyFinalScore = useCallback(
     (dimensionId: string, value: number) => {
       if (!currentItem) return
       setItemStates((prev) => ({
@@ -271,6 +297,7 @@ export function ReconcileClient({
             ...prev[currentItem.feedbackItemId].scores,
             [dimensionId]: value,
           },
+          saved: false,
         },
       }))
       setSaveStatus('idle')
@@ -278,18 +305,35 @@ export function ReconcileClient({
     [currentItem]
   )
 
+  const handleFinalScoreChange = useCallback(
+    (dimensionId: string, value: number) => {
+      if (!currentItem || isLocked) return
+      // No-op if the value didn't actually change.
+      if (currentState?.scores[dimensionId] === value) return
+      // Warn before changing a score the pair already agreed on and saved.
+      if (currentState?.saved) {
+        setPendingEdit({ dimensionId, value })
+        return
+      }
+      applyFinalScore(dimensionId, value)
+    },
+    [currentItem, isLocked, currentState, applyFinalScore]
+  )
+
   const handleNotesChange = useCallback(
     (notes: string) => {
-      if (!currentItem) return
+      if (!currentItem || isLocked) return
       setItemStates((prev) => ({
         ...prev,
         [currentItem.feedbackItemId]: {
           ...prev[currentItem.feedbackItemId],
           notes,
+          // Editing the rationale on a saved item re-opens it for re-saving.
+          saved: false,
         },
       }))
     },
-    [currentItem]
+    [currentItem, isLocked]
   )
 
   // Escalate a single criterion to the adjudicator. Per Amber's 2026-04-09
@@ -493,8 +537,9 @@ export function ReconcileClient({
     )
   }
 
-  // All resolved
-  if (resolvedCount === items.length) {
+  // All resolved — show the completion summary, with an escape hatch back into
+  // editing (unless an admin has locked the batch). reviewMode bypasses this.
+  if (resolvedCount === items.length && !reviewMode) {
     return (
       <AppShell defaultCollapsed>
         <div className="mx-auto flex max-w-lg flex-col items-center justify-center gap-4 py-20 text-center">
@@ -506,7 +551,32 @@ export function ReconcileClient({
               <> ({summary.totalDiscrepancies} discrepancies resolved)</>
             )}
           </p>
-          <Button onClick={() => router.push('/')}>Return to Dashboard</Button>
+          {isLocked ? (
+            <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+              <Lock className="size-3.5 shrink-0" />
+              This batch has been locked by an admin. Scores can no longer be changed.
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              Need to change a final score? You can edit it until an admin locks
+              the batch.
+            </p>
+          )}
+          <div className="flex items-center gap-2">
+            {!isLocked && (
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setCurrentIndex(0)
+                  setReviewMode(true)
+                }}
+              >
+                <Pencil className="mr-1 size-4" />
+                Edit reconciled scores
+              </Button>
+            )}
+            <Button onClick={() => router.push('/')}>Return to Dashboard</Button>
+          </div>
         </div>
       </AppShell>
     )
@@ -529,12 +599,27 @@ export function ReconcileClient({
                 Dashboard
               </Button>
               <span className="text-sm font-medium">{batchName}</span>
-              <Badge
-                variant="outline"
-                className="bg-status-reconciliation-bg text-status-reconciliation-text"
-              >
-                Reconciling
-              </Badge>
+              {isLocked ? (
+                <Badge variant="outline" className="bg-muted text-muted-foreground">
+                  <Lock className="mr-1 size-3" />
+                  Locked
+                </Badge>
+              ) : reviewMode ? (
+                <Badge
+                  variant="outline"
+                  className="bg-status-complete-bg text-status-complete-text"
+                >
+                  <Pencil className="mr-1 size-3" />
+                  Editing reconciled
+                </Badge>
+              ) : (
+                <Badge
+                  variant="outline"
+                  className="bg-status-reconciliation-bg text-status-reconciliation-text"
+                >
+                  Reconciling
+                </Badge>
+              )}
             </div>
 
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -591,6 +676,18 @@ export function ReconcileClient({
           </div>
         </div>
       </header>
+
+      {isLocked && (
+        <div className="border-b border-border bg-muted/40 px-4 py-2.5">
+          <div className="mx-auto flex max-w-7xl items-center gap-2 text-xs text-muted-foreground">
+            <Lock className="size-3.5 shrink-0" />
+            <span>
+              This batch has been locked by an admin. Final scores are frozen and
+              can no longer be changed.
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Split pane: left (content) + right (reconciliation) */}
       <main className="mx-auto flex w-full max-w-7xl flex-1 gap-6 p-4 lg:p-6">
@@ -791,7 +888,7 @@ export function ReconcileClient({
                           size="sm"
                           variant="ghost"
                           className="h-7 gap-1 px-2 text-xs"
-                          disabled={isEscalatingThis}
+                          disabled={isEscalatingThis || isLocked}
                           onClick={() => handleWithdrawEscalation(disc.dimensionId)}
                         >
                           {isEscalatingThis ? (
@@ -817,10 +914,11 @@ export function ReconcileClient({
                               return (
                               <button
                                   key={val}
+                                  disabled={isLocked}
                                   onClick={() =>
                                     handleFinalScoreChange(disc.dimensionId, val)
                                   }
-                                  className={`rounded-xl border-2 px-4 py-3 text-left text-sm font-medium transition-all duration-200 ${
+                                  className={`rounded-xl border-2 px-4 py-3 text-left text-sm font-medium transition-all duration-200 disabled:cursor-not-allowed disabled:opacity-50 ${
                                     isSelected
                                       ? getSelectedScoreColor(
                                           val,
@@ -844,7 +942,7 @@ export function ReconcileClient({
                           size="sm"
                           variant="outline"
                           className="h-7 gap-1 self-start px-2 text-xs"
-                          disabled={isEscalatingThis || !hasAdjudicator}
+                          disabled={isEscalatingThis || !hasAdjudicator || isLocked}
                           title={
                             !hasAdjudicator
                               ? 'An admin must assign an adjudicator to this batch before you can escalate.'
@@ -936,6 +1034,7 @@ export function ReconcileClient({
                   placeholder="e.g. Agreed it was unclear because the feedback points to a problem but not a usable next step..."
                   value={currentState?.notes ?? ''}
                   onChange={(e) => handleNotesChange(e.target.value)}
+                  disabled={isLocked}
                   className="mt-2 text-sm"
                   rows={3}
                 />
@@ -968,7 +1067,12 @@ export function ReconcileClient({
               {/* Save & Continue button */}
               <Button
                 onClick={handleSaveAndContinue}
-                disabled={!allDiscrepanciesScored || saving || currentState?.saved}
+                disabled={
+                  isLocked ||
+                  !allDiscrepanciesScored ||
+                  saving ||
+                  currentState?.saved
+                }
                 className="w-full"
               >
                 {saving ? (
@@ -989,6 +1093,43 @@ export function ReconcileClient({
           </Card>
         </div>
       </main>
+
+      {/* Warn before changing a final score the pair already reconciled. */}
+      <Dialog
+        open={pendingEdit != null}
+        onOpenChange={(open) => {
+          if (!open) setPendingEdit(null)
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="size-4 text-warning" />
+              Change an already-reconciled score?
+            </DialogTitle>
+            <DialogDescription>
+              You and your partner already reconciled this item. Changing the
+              final score will overwrite the value you saved. This is fine if you
+              meant to revise it — just confirm you want to change it.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPendingEdit(null)}>
+              Keep current score
+            </Button>
+            <Button
+              onClick={() => {
+                if (pendingEdit) {
+                  applyFinalScore(pendingEdit.dimensionId, pendingEdit.value)
+                }
+                setPendingEdit(null)
+              }}
+            >
+              Yes, change it
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </AppShell>
   )
 }
