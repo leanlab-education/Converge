@@ -40,6 +40,7 @@ import {
   buildNavWindow,
   getScoreColor,
   getSelectedScoreColor,
+  getUnselectedOptionColor,
 } from '@/lib/scoring-utils'
 import {
   getOptimalFlag,
@@ -788,7 +789,7 @@ export function ReconcileClient({
                       ) : (
                         <AlertTriangle className="size-3.5 text-warning" />
                       )}
-                      <Label className="text-sm font-semibold text-foreground">
+                      <Label className="text-base font-bold text-foreground">
                         {disc.dimensionLabel}
                       </Label>
                       {isAdjudicated ? (
@@ -925,7 +926,7 @@ export function ReconcileClient({
                                           disc.scaleMin,
                                           disc.scaleMax
                                         )
-                                      : `${getScoreColor(val, disc.scaleMin, disc.scaleMax)} hover:shadow-md`
+                                      : `${getUnselectedOptionColor()} hover:shadow-md`
                                   }`}
                                 >
                                   {label && (

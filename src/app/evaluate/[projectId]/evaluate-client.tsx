@@ -37,6 +37,7 @@ import {
   buildNavWindow,
   getScoreColor,
   getSelectedScoreColor,
+  getUnselectedOptionColor,
 } from '@/lib/scoring-utils'
 import {
   getOptimalFlag,
@@ -965,7 +966,7 @@ export function EvaluateClient({
                                     dim.scaleMin,
                                     dim.scaleMax
                                   )
-                                : `${getScoreColor(val, dim.scaleMin, dim.scaleMax)} hover:shadow-md`
+                                : `${getUnselectedOptionColor()} hover:shadow-md`
                             }`}
                           >
                             {label && (

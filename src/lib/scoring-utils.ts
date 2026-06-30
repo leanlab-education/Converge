@@ -27,6 +27,20 @@ export function buildNavWindow(
   return result
 }
 
+/**
+ * Neutral styling for an UNSELECTED selectable score option. The score's
+ * color (green/red) only appears once chosen (getSelectedScoreColor) — this
+ * keeps the option row quiet by default and makes the picked answer pop,
+ * reducing mis-clicks. (Luofan/Amber, 2026-06-25.)
+ *
+ * Note: this is for the clickable option buttons only. The read-only chips that
+ * show what each annotator already scored (the reconcile/adjudicate comparison)
+ * still use getScoreColor so disagreements stay visible at a glance.
+ */
+export function getUnselectedOptionColor(): string {
+  return 'border-border bg-background text-foreground hover:bg-muted hover:border-foreground/30'
+}
+
 /** Unselected score button colors based on value ratio within scale. */
 export function getScoreColor(value: number, min: number, max: number): string {
   if (max === min)

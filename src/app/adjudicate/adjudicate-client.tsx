@@ -14,7 +14,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { Loader2, Gavel, CheckCircle, AlertTriangle } from 'lucide-react'
 import { AppShell } from '@/components/app-shell'
-import { getScoreColor, getSelectedScoreColor } from '@/lib/scoring-utils'
+import { getScoreColor, getSelectedScoreColor, getUnselectedOptionColor } from '@/lib/scoring-utils'
 import {
   getOptimalFlag,
   isAppropriateFeedbackDecision,
@@ -357,7 +357,7 @@ export function AdjudicateClient({ userName }: { userName: string }) {
                                       item.dimension.scaleMin,
                                       item.dimension.scaleMax
                                     )
-                                  : `${getScoreColor(val, item.dimension.scaleMin, item.dimension.scaleMax)} hover:shadow-md`
+                                  : `${getUnselectedOptionColor()} hover:shadow-md`
                               }`}
                             >
                               {label && (

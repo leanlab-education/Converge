@@ -3,7 +3,27 @@ import {
   buildNavWindow,
   getScoreColor,
   getSelectedScoreColor,
+  getUnselectedOptionColor,
 } from '@/lib/scoring-utils'
+
+describe('getUnselectedOptionColor', () => {
+  it('is value-independent (neutral default for every option)', () => {
+    // Luofan/Amber: unselected options are neutral; color only appears on select.
+    const neutral = getUnselectedOptionColor()
+    expect(getUnselectedOptionColor()).toBe(neutral)
+  })
+
+  it('carries no score color token (no green/red until selected)', () => {
+    const neutral = getUnselectedOptionColor()
+    expect(neutral).not.toMatch(/score-(low|mid|high)/)
+  })
+
+  it('does not change the SELECTED color (color still appears on pick)', () => {
+    // Guard: the selection still surfaces green/red so the picked answer pops.
+    expect(getSelectedScoreColor(1, 1, 3)).toMatch(/score-low-solid/)
+    expect(getSelectedScoreColor(3, 1, 3)).toMatch(/score-high-solid/)
+  })
+})
 
 describe('getScoreColor (unselected)', () => {
   it('returns low token at the bottom of a 1-3 scale (ratio 0)', () => {
