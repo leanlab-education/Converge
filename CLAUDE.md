@@ -67,7 +67,7 @@ RubricDimension   — per-project scoring criteria with configurable scales
 FeedbackItem      — imported from CSV (studentText, feedbackText, feedbackSource, teacherId, conjunctionId, optimal, feedbackType, slotIndex)
 ProjectEvaluator  — M:M join between projects and users, with per-project role (EVALUATOR | PROJECT_ADMIN)
 Assignment        — which evaluator scores which items
-Batch             — groups of items with status (DRAFT → SCORING → RECONCILING → COMPLETE), type (REGULAR | TRAINING), isDoubleScored
+Batch             — groups of items with status (DRAFT → SCORING → RECONCILING → COMPLETE), type (REGULAR | TRAINING), isDoubleScored, isLocked (+ lockedAt/lockedById)
 BatchAssignment   — annotator ↔ batch with scoringRole (PRIMARY | DOUBLE), one row per annotator who scores anything in the batch
 EvaluatorTeam     — pairs of evaluators assigned to specific rubric criteria
 EvaluatorTeamMember    — team ↔ user join
@@ -91,6 +91,16 @@ For every team release in a batch:
 - **Non-double-scored regular**: both team members are assigned to the batch (both have `BatchAssignment` rows), but each only sees their slot's half of the items via `FeedbackItem.slotIndex`. No reconciliation — each item gets one score per criterion.
 
 `TeamBatchRelease.scorerUserId` is legacy. New non-double-scored regular batches leave it null and rely on the slot split. The field is preserved on existing rows but unused by the UI.
+
+### Batch lock & editable reconciliation (shipped 2026-06-30)
+
+`COMPLETE` and "frozen" are **separate** concepts:
+- **`COMPLETE`** only means every discrepancy in the release has been resolved (auto-set by `maybeCompleteReleaseReconciliation`). It does **not** freeze the batch.
+- **`Batch.isLocked`** is an explicit admin freeze (Batches tab → Lock/Unlock, `PATCH /api/projects/[id]/batches/[batchId]` with `{isLocked}`). Reversible.
+
+Because of this split, a pair can **revisit and correct an already-reconciled final score** (with a confirmation warning) as long as the batch is unlocked — even after the release auto-completed. Once an admin locks the batch, all score/reconcile/adjudicate writes are refused with **HTTP 423**.
+
+**The guard is centralized** in `src/lib/reconciliation-access.ts` (`evaluateReconciliationAccess` / `isReconcilableStatus`) — do not re-inline lock/status checks. It's enforced in the reconcile, discrepancies, escalate, adjudicate, and scores routes (unit-tested in `reconciliation-access.test.ts`). Editable/COMPLETE-but-unlocked releases surface on the annotator project page as a **"Review / Edit"** reconcile task.
 
 ## Auth
 
@@ -221,7 +231,7 @@ Full reference: `docs/DESIGN_SYSTEM.md`
 
 1. **Never use hardcoded Tailwind colors** (no `zinc-*`, `blue-*`, `green-*`, etc.) — always use semantic tokens (`text-foreground`, `bg-background`, `text-muted-foreground`) or domain tokens (`bg-status-active-bg`, `bg-score-high-solid`, `text-success`, `text-destructive`)
 2. **Status badges**: Import `statusColors` from `src/lib/status-colors.ts` — never define inline
-3. **Scoring colors**: Use `getScoreColor()` / `getSelectedScoreColor()` in evaluate-client — they return semantic token classes
+3. **Scoring option buttons** (all from `src/lib/scoring-utils.ts`): selectable options render neutral by default via `getUnselectedOptionColor()` and only show green/red once selected via `getSelectedScoreColor()`; order them with `getScaleOptions(min, max)` which returns values **most-positive first** (e.g. "Meets Criterion" left of "Does Not Meet"). Use `getScoreColor()` only for read-only chips that display an already-recorded value (e.g. the reconcile/adjudicate comparison chips), so disagreements stay visible. (Annotator feedback — Abi/Luofan, shipped 2026-06-30/07-01.)
 4. **Content cards**: Use `bg-content-student-*` / `bg-content-feedback-*` tokens for the split-pane evaluation view
 5. **Dark mode is automatic** — just use semantic tokens and it works. Both `:root` and `.dark` are fully defined in globals.css
 6. **All interactive elements**: Add `transition-all duration-200`

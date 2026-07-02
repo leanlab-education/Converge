@@ -44,3 +44,6 @@ next-env.d.ts
 
 # claude code agent worktrees (throwaway)
 .claude/worktrees/
+
+# local session handoff (not for shared repo)
+/handoff.md
