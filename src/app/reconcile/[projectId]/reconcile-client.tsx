@@ -38,6 +38,7 @@ import {
 import { AppShell } from '@/components/app-shell'
 import {
   buildNavWindow,
+  getScaleOptions,
   getScoreColor,
   getSelectedScoreColor,
   getUnselectedOptionColor,
@@ -774,10 +775,7 @@ export function ReconcileClient({
                 const isEscalated = disc.escalation != null
                 const isEscalatingThis = escalatingDimId === disc.dimensionId
 
-                const scaleOptions: number[] = []
-                for (let v = disc.scaleMin; v <= disc.scaleMax; v++) {
-                  scaleOptions.push(v)
-                }
+                const scaleOptions = getScaleOptions(disc.scaleMin, disc.scaleMax)
 
                 return (
                   <div key={disc.dimensionId} className="flex flex-col gap-3">

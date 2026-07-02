@@ -35,6 +35,7 @@ import {
 import { AppShell } from '@/components/app-shell'
 import {
   buildNavWindow,
+  getScaleOptions,
   getScoreColor,
   getSelectedScoreColor,
   getUnselectedOptionColor,
@@ -838,10 +839,10 @@ export function EvaluateClient({
                         {fullRubric.map((dim) => {
                           const scoreLabels = parseScoreLabels(dim.scoreLabelJson)
                           const guidance = parseGuidance(dim.guidanceJson)
-                          const scaleOptions: number[] = []
-                          for (let v = dim.scaleMin; v <= dim.scaleMax; v++) {
-                            scaleOptions.push(v)
-                          }
+                          const scaleOptions = getScaleOptions(
+                            dim.scaleMin,
+                            dim.scaleMax
+                          )
 
                           return (
                             <Card key={dim.id}>
@@ -933,10 +934,7 @@ export function EvaluateClient({
                     (s) => s.dimensionId === dim.id
                   )?.value ?? null
 
-                const scaleOptions: number[] = []
-                for (let v = dim.scaleMin; v <= dim.scaleMax; v++) {
-                  scaleOptions.push(v)
-                }
+                const scaleOptions = getScaleOptions(dim.scaleMin, dim.scaleMax)
 
                 return (
                   <div key={dim.id} className="flex flex-col gap-2">

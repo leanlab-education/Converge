@@ -28,6 +28,21 @@ export function buildNavWindow(
 }
 
 /**
+ * Score option values for a scale, ordered most-positive first (highest value
+ * on the left). So for a Does-Not-Meet(min)/Meets(max) criterion the options
+ * read "Meets Criterion" then "Does Not Meet Criterion" left-to-right. (Abi via
+ * Amber, 2026-07-01.)
+ *
+ * This only changes left-to-right DISPLAY order — each option still carries its
+ * own value, so the stored score for a given label is unchanged.
+ */
+export function getScaleOptions(min: number, max: number): number[] {
+  const options: number[] = []
+  for (let v = max; v >= min; v--) options.push(v)
+  return options
+}
+
+/**
  * Neutral styling for an UNSELECTED selectable score option. The score's
  * color (green/red) only appears once chosen (getSelectedScoreColor) — this
  * keeps the option row quiet by default and makes the picked answer pop,

@@ -14,7 +14,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { Loader2, Gavel, CheckCircle, AlertTriangle } from 'lucide-react'
 import { AppShell } from '@/components/app-shell'
-import { getScoreColor, getSelectedScoreColor, getUnselectedOptionColor } from '@/lib/scoring-utils'
+import { getScaleOptions, getScoreColor, getSelectedScoreColor, getUnselectedOptionColor } from '@/lib/scoring-utils'
 import {
   getOptimalFlag,
   isAppropriateFeedbackDecision,
@@ -198,14 +198,10 @@ export function AdjudicateClient({ userName }: { userName: string }) {
               const scoreLabels = parseScoreLabels(
                 item.dimension.scoreLabelJson
               )
-              const scaleOptions: number[] = []
-              for (
-                let v = item.dimension.scaleMin;
-                v <= item.dimension.scaleMax;
-                v++
-              ) {
-                scaleOptions.push(v)
-              }
+              const scaleOptions = getScaleOptions(
+                item.dimension.scaleMin,
+                item.dimension.scaleMax
+              )
               const isSaving = savingId === item.escalationId
 
               return (

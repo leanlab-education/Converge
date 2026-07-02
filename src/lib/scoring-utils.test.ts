@@ -1,10 +1,32 @@
 import { describe, it, expect } from 'vitest'
 import {
   buildNavWindow,
+  getScaleOptions,
   getScoreColor,
   getSelectedScoreColor,
   getUnselectedOptionColor,
 } from '@/lib/scoring-utils'
+
+describe('getScaleOptions', () => {
+  it('orders a binary scale most-positive first (Meets before Does Not Meet)', () => {
+    // A 0=Does Not Meet / 1=Meets criterion → [1, 0] so "Meets" renders left.
+    expect(getScaleOptions(0, 1)).toEqual([1, 0])
+  })
+
+  it('orders a 1-3 scale high to low', () => {
+    expect(getScaleOptions(1, 3)).toEqual([3, 2, 1])
+  })
+
+  it('returns every value in the inclusive range (no values dropped)', () => {
+    const opts = getScaleOptions(1, 5)
+    expect(opts).toEqual([5, 4, 3, 2, 1])
+    expect([...opts].sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5])
+  })
+
+  it('handles a single-value scale', () => {
+    expect(getScaleOptions(2, 2)).toEqual([2])
+  })
+})
 
 describe('getUnselectedOptionColor', () => {
   it('is value-independent (neutral default for every option)', () => {
