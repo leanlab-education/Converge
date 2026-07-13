@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   DEFAULT_RUBRIC,
-  QUILL_FEEDBACK_RUBRIC_V11,
+  QUILL_FEEDBACK_RUBRIC,
   type RubricDimensionTemplate,
 } from '@/lib/rubric-templates'
 
@@ -18,7 +18,7 @@ const EXPECTED_KEYS = [
 
 describe('DEFAULT_RUBRIC', () => {
   it('is the dimensions array of the V11 Quill template', () => {
-    expect(DEFAULT_RUBRIC).toBe(QUILL_FEEDBACK_RUBRIC_V11.dimensions)
+    expect(DEFAULT_RUBRIC).toBe(QUILL_FEEDBACK_RUBRIC.dimensions)
   })
 
   it('has exactly 8 dimensions', () => {
@@ -99,11 +99,11 @@ describe('DEFAULT_RUBRIC', () => {
   })
 })
 
-describe('QUILL_FEEDBACK_RUBRIC_V11 metadata', () => {
+describe('QUILL_FEEDBACK_RUBRIC metadata', () => {
   it('exposes a stable id, name, and version', () => {
-    expect(QUILL_FEEDBACK_RUBRIC_V11.id).toBe('quill-feedback-v11')
-    expect(QUILL_FEEDBACK_RUBRIC_V11.name).toBe('Quill Feedback Rubric')
-    expect(QUILL_FEEDBACK_RUBRIC_V11.version.length).toBeGreaterThan(0)
+    expect(QUILL_FEEDBACK_RUBRIC.id).toBe('quill-feedback-v12')
+    expect(QUILL_FEEDBACK_RUBRIC.name).toBe('Quill Feedback Rubric')
+    expect(QUILL_FEEDBACK_RUBRIC.version.length).toBeGreaterThan(0)
   })
 
   it('matches the RubricDimensionTemplate shape (type smoke check)', () => {

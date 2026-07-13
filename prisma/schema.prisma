@@ -28,6 +28,7 @@ model User {
   teamBatchReleases     TeamBatchRelease[] @relation("TeamBatchReleaseScorer")
   escalationsCreated    Escalation[]   @relation("EscalationEscalatedBy")
   escalationsResolved   Escalation[]   @relation("EscalationResolvedBy")
+  criterionUnlocksOpened ReleaseCriterionUnlock[] @relation("CriterionUnlockOpenedBy")
   activitySessions      ActivitySession[]
   activityDays          ActivityDaily[]
 }
@@ -103,6 +104,7 @@ model RubricDimension {
   scores         Score[]
   teamDimensions EvaluatorTeamDimension[]
   escalations    Escalation[]
+  criterionUnlocks ReleaseCriterionUnlock[]
 
   @@unique([projectId, key])
 }
@@ -286,8 +288,32 @@ model TeamBatchRelease {
   adjudicator User?             @relation("TeamReleaseAdjudicator", fields: [adjudicatorId], references: [id], onDelete: SetNull)
   assignments BatchAssignment[]
   escalations Escalation[]
+  criterionUnlocks ReleaseCriterionUnlock[]
 
   @@unique([batchId, teamId])
+}
+
+// Admin "re-open" of a single criterion for one pair on one (already closed or
+// reconciling) batch — lets both team members go back and revise their own raw
+// scores for just that criterion, without unfreezing the rest of the batch.
+//
+// Presence of a row = that (teamRelease, dimension) is open for revision. The
+// scoped write path (revise route) checks this instead of the normal
+// SCORING-status gate. Reversible: deleting the row re-closes the criterion.
+// Scoped to a dimension so e.g. Task Aligned Revision can be reopened while
+// Anchored in Student Response stays untouched. (Amber/V12, 2026-07)
+model ReleaseCriterionUnlock {
+  id            String   @id @default(cuid())
+  teamReleaseId String
+  dimensionId   String
+  openedById    String   // admin who opened it
+  openedAt      DateTime @default(now())
+
+  teamRelease TeamBatchRelease @relation(fields: [teamReleaseId], references: [id], onDelete: Cascade)
+  dimension   RubricDimension  @relation(fields: [dimensionId], references: [id], onDelete: Cascade)
+  openedBy    User             @relation("CriterionUnlockOpenedBy", fields: [openedById], references: [id], onDelete: Cascade)
+
+  @@unique([teamReleaseId, dimensionId])
 }
 
 // ============================================

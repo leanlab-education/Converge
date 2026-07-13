@@ -89,6 +89,7 @@ export async function GET(
               },
             },
           },
+          criterionUnlocks: { select: { dimensionId: true } },
         },
         orderBy: { team: { name: 'asc' } },
       },
@@ -269,6 +270,7 @@ export async function GET(
             actualScoreCount,
             expectedScoreCount,
             irr: teamIrrByReleaseId.get(release.id) ?? null,
+            unlockedDimensionIds: release.criterionUnlocks.map((u) => u.dimensionId),
           }
         })
       )

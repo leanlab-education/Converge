@@ -12,7 +12,7 @@ import {
 } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
-import { ArrowRight, Layers, Scale, Users, Gavel, CheckCircle2 } from 'lucide-react'
+import { ArrowRight, Layers, Scale, Users, Gavel, CheckCircle2, PencilLine } from 'lucide-react'
 import { AppShell } from '@/components/app-shell'
 
 interface BatchInfo {
@@ -45,6 +45,13 @@ interface AdjudicateTask {
   count: number
 }
 
+interface ReviseTask {
+  batchId: string
+  batchName: string
+  criterionLabel: string
+  isLocked: boolean
+}
+
 interface Project {
   id: string
   name: string
@@ -56,11 +63,13 @@ export function EvaluatorProjectPage({
   batches,
   reconcileTasks,
   adjudicateTasks,
+  reviseTasks,
 }: {
   project: Project
   batches: BatchInfo[]
   reconcileTasks: ReconcileTask[]
   adjudicateTasks: AdjudicateTask[]
+  reviseTasks: ReviseTask[]
   userName: string
 }) {
   const router = useRouter()
@@ -113,6 +122,50 @@ export function EvaluatorProjectPage({
                 </div>
               )}
             </div>
+
+            {reviseTasks.length > 0 && (
+              <div className="mb-5 space-y-3">
+                {reviseTasks.map((task) => (
+                  <Card
+                    key={`${task.batchId}-${task.criterionLabel}`}
+                    className="border-warning/30 bg-warning/5 transition-all duration-200 hover:shadow-sm"
+                  >
+                    <CardHeader className="pb-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <CardTitle className="flex items-center gap-2 text-base">
+                          <PencilLine className="size-4 shrink-0 text-warning" />
+                          {task.batchName}
+                        </CardTitle>
+                        <Badge
+                          variant="outline"
+                          className="border-warning/40 bg-warning/10 text-warning"
+                        >
+                          Re-opened
+                        </Badge>
+                      </div>
+                      <CardDescription>
+                        “{task.criterionLabel}” was re-opened for you to review and
+                        revise. Your other criteria are unchanged.
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="flex justify-end">
+                        <Button
+                          size="sm"
+                          disabled={task.isLocked}
+                          onClick={() =>
+                            router.push(`/revise/${project.id}?batchId=${task.batchId}`)
+                          }
+                        >
+                          {task.isLocked ? 'Locked' : `Revise ${task.criterionLabel}`}
+                          {!task.isLocked && <ArrowRight className="size-3.5" />}
+                        </Button>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            )}
 
             {reconciliationCount > 0 && (
               <button

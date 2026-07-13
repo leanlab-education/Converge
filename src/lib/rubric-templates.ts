@@ -78,10 +78,10 @@ function createCriterion(
 }
 
 // Keep keys stable so existing score rows, exports, and team assignments remain valid.
-export const QUILL_FEEDBACK_RUBRIC_V11: RubricTemplateDefinition = {
-  id: 'quill-feedback-v11',
+export const QUILL_FEEDBACK_RUBRIC: RubricTemplateDefinition = {
+  id: 'quill-feedback-v12',
   name: 'Quill Feedback Rubric',
-  version: 'V11, June 2026',
+  version: 'V12, July 2026',
   dimensions: [
     createCriterion(
       'criterion_1',
@@ -92,37 +92,45 @@ export const QUILL_FEEDBACK_RUBRIC_V11: RubricTemplateDefinition = {
           'Did the feedback correctly identify whether the student needed to revise?',
         meets: [
           paragraph(
-            'Feedback correctly determines that the student response should receive feedback.'
+            'Feedback correctly determines that the student response should receive feedback. That is:'
           ),
           bullet(
-            'The response does NOT meet the goal (i.e., does not successfully complete a claim with relevant evidence)'
+            'The response does NOT meet the evidence goal (i.e., does not successfully complete a claim with relevant evidence)'
           ),
-          paragraph(
-            'If the response meets the goal, feedback indicates that the student can move on (even if extra feedback was given).'
+          bullet('If the response meets the evidence goal, but not the grammar goal'),
+          label('NOTES:'),
+          bullet(
+            'Indicator in the platform that flags “needs revision” or “not” — this comes from the Quill system'
           ),
+          bullet(
+            'The optimal indicator will flag “needing revision” if the student response met the evidence goal but can improve grammar'
+          ),
+          bullet('Annotator can still override the indicator (“optimal”) decision'),
+          bullet('Annotators should read the Quill activity text for the topic'),
         ],
         doesNotMeet: [
           paragraph(
-            'Feedback incorrectly identifies whether the student has met the task goal.'
+            'Feedback incorrectly identifies whether the student response should receive feedback.'
           ),
           label('Examples'),
           bullet('“Great job, you can move on” (when it’s actually wrong)'),
           bullet('OR “This needs revision” (when it’s actually right)'),
+          paragraph('NOTE: Annotator may override the feedback writer’s decision.'),
         ],
       },
       {
         doesNotMeet:
-          'Feedback incorrectly identifies whether the student has met the task goal.',
+          'Feedback incorrectly identifies whether the student response should receive feedback.',
         meets:
-          'Feedback correctly determines whether the student should revise or can move on.',
+          'Feedback correctly determines that the student response should receive feedback.',
       }
     ),
     createCriterion(
       'criterion_2',
       'Task Aligned Revision',
-      'Is the feedback about use of evidence?',
+      'Does the feedback address the learning objective(s)?',
       {
-        prompt: 'Is the feedback about use of evidence?',
+        prompt: 'Does the feedback address the learning objective(s)?',
         meets: [
           paragraph(
             'Feedback is aligned to the task and supports progress toward completing it.'
@@ -133,18 +141,20 @@ export const QUILL_FEEDBACK_RUBRIC_V11: RubricTemplateDefinition = {
           bullet(
             'Tells students to write one sentence if they wrote more than one initially'
           ),
-          paragraph('When the task is already met, feedback may:'),
-          bullet('Reinforce effective use of evidence, OR'),
           bullet(
-            'Offer optional improvements (e.g., clarity or grammar) that extend the response without implying it is incomplete'
+            'Feedback may also target other relevant improvements (e.g., clarity or grammar)'
           ),
+          bullet('Reinforces students’ effective use of evidence'),
         ],
         doesNotMeet: [
           paragraph(
             'Feedback is not aligned to the task and/or does not support meaningful progress toward completing the task.'
           ),
-          paragraph(
-            'Feedback focuses on issues unrelated to the task or addresses lower-priority concerns while higher-priority issues (e.g., missing, incorrect, or unclear evidence) remain unaddressed unless problematic grammar impedes understanding of the student response, then grammar may be the priority.'
+          bullet(
+            'Feedback focuses on issues unrelated to the task (i.e., feedback is not related to use of evidence or grammar; e.g., asking someone to quote the text)'
+          ),
+          bullet(
+            'Feedback introduces a requirement that is not specified in the directions (e.g., asking for a particular amount of evidence such as “2 [or more] pieces”)'
           ),
         ],
       },
@@ -412,4 +422,4 @@ export const QUILL_FEEDBACK_RUBRIC_V11: RubricTemplateDefinition = {
   ],
 }
 
-export const DEFAULT_RUBRIC = QUILL_FEEDBACK_RUBRIC_V11.dimensions
+export const DEFAULT_RUBRIC = QUILL_FEEDBACK_RUBRIC.dimensions

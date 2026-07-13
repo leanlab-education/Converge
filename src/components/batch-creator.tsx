@@ -29,6 +29,7 @@ interface TeamReleaseRow {
   scorer: { id: string; email: string; name: string | null } | null
   members: { id: string; email: string; name: string | null }[]
   dimensions: { id: string; label: string }[]
+  unlockedDimensionIds?: string[]
   progressPct: number
   irr?: {
     isApplicable: boolean
@@ -292,6 +293,38 @@ export function BatchCreator({
     } catch (error) {
       setLocalBatches(previousBatches)
       console.error('Failed to update team release:', error)
+    }
+  }
+
+  async function handleToggleCriterionUnlock(
+    batchId: string,
+    releaseId: string,
+    dimensionId: string,
+    open: boolean
+  ) {
+    if (open) {
+      const ok = window.confirm(
+        'Re-open this criterion for the pair? Both annotators will be able to go back and revise their individual scores for this one criterion. Reconciliation re-derives from their revised scores.'
+      )
+      if (!ok) return
+    }
+    try {
+      const response = await fetch(
+        `/api/projects/${projectId}/batches/${batchId}/criterion-unlocks`,
+        {
+          method: open ? 'POST' : 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ releaseId, dimensionId }),
+        }
+      )
+      if (response.ok) {
+        await onBatchesChange({ silent: true })
+      } else {
+        const body = await response.json().catch(() => ({}))
+        window.alert(body.error || 'Failed to update re-open state')
+      }
+    } catch (error) {
+      console.error('Failed to toggle criterion unlock:', error)
     }
   }
 
@@ -789,6 +822,43 @@ export function BatchCreator({
                                     </option>
                                   ))}
                                 </select>
+                              </div>
+                            )}
+                            {/* Re-open a single criterion for this pair to revise
+                                their individual scores on a closed/reconciling batch. */}
+                            {batch.type === 'REGULAR' && batch.isDoubleScored && (
+                              <div className="mt-2 border-t border-border/40 pt-2">
+                                <div className="mb-1 flex items-center gap-1 text-[10px] text-muted-foreground">
+                                  <LockOpen className="size-2.5" />
+                                  Re-open criterion for re-scoring
+                                </div>
+                                <div className="flex flex-wrap gap-1">
+                                  {release.dimensions.map((dim) => {
+                                    const open = release.unlockedDimensionIds?.includes(dim.id) ?? false
+                                    return (
+                                      <button
+                                        key={dim.id}
+                                        disabled={batch.isLocked}
+                                        onClick={() =>
+                                          handleToggleCriterionUnlock(batch.id, release.id, dim.id, !open)
+                                        }
+                                        title={
+                                          open
+                                            ? `Close "${dim.label}" — stop revisions`
+                                            : `Re-open "${dim.label}" for this pair to revise`
+                                        }
+                                        className={cn(
+                                          'rounded-full px-2 py-0.5 text-[10px] font-medium ring-1 transition-all duration-200 disabled:cursor-not-allowed disabled:opacity-50',
+                                          open
+                                            ? 'bg-warning/15 text-warning ring-warning/30 hover:bg-warning/25'
+                                            : 'bg-muted text-muted-foreground ring-border hover:bg-muted/80'
+                                        )}
+                                      >
+                                        {open ? `● ${dim.label}` : dim.label}
+                                      </button>
+                                    )
+                                  })}
+                                </div>
                               </div>
                             )}
                             {/* Per-team scorer — split 50/50 or assign one named scorer (non-double regular) */}

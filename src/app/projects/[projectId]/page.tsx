@@ -176,12 +176,40 @@ export default async function ProjectPage({
   }
   const adjudicateTasks = Array.from(adjudicateMap.values())
 
+  // --- Revise: criteria an admin re-opened for this annotator's pair ---
+  // Each ReleaseCriterionUnlock on a batch this user's team scored lets them go
+  // back and edit their individual scores for just that one criterion.
+  const reviseUnlocks = await prisma.releaseCriterionUnlock.findMany({
+    where: {
+      teamRelease: {
+        batch: { projectId, isHidden: false },
+        team: { members: { some: { userId } } },
+      },
+    },
+    select: {
+      dimension: { select: { label: true } },
+      teamRelease: {
+        select: {
+          batchId: true,
+          batch: { select: { name: true, isLocked: true } },
+        },
+      },
+    },
+  })
+  const reviseTasks = reviseUnlocks.map((u) => ({
+    batchId: u.teamRelease.batchId,
+    batchName: u.teamRelease.batch.name,
+    criterionLabel: u.dimension.label,
+    isLocked: u.teamRelease.batch.isLocked,
+  }))
+
   return (
     <EvaluatorProjectPage
       project={projectEvaluator.project}
       batches={batches}
       reconcileTasks={reconcileTasks}
       adjudicateTasks={adjudicateTasks}
+      reviseTasks={reviseTasks}
       userName={session.user.name || session.user.email || 'Annotator'}
     />
   )

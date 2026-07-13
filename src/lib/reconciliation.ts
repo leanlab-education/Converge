@@ -197,6 +197,152 @@ export async function maybeAdvanceReleaseAfterScore(
   return true
 }
 
+/**
+ * Re-settle reconciliation for ONE item×dimension after that annotator revised
+ * their individual (raw) score — used by the admin "re-open a criterion" flow.
+ * Only the revised item is touched, so every other item's reconciliation
+ * (including the pair's manual decisions on other disagreements) is preserved.
+ * Only this dimension is touched, so other criteria (e.g. Anchored) are untouched.
+ *
+ * For the revised item, in this dimension:
+ *   - both members now AGREE  → upsert the reconciled final to the agreed value
+ *     (replacing any stale prior final — Amber's "if they now agree, drop the old
+ *     reconciled value in favor of the new agreement").
+ *   - both members now DISAGREE → delete any existing reconciled final for this
+ *     item so it re-surfaces as an open discrepancy for the pair to reconcile
+ *     again (the item's inputs changed, so a prior decision no longer applies).
+ *
+ * Then the release status is re-derived across all items: back to RECONCILING if
+ * any open discrepancy/escalation remains, or COMPLETE if everything is resolved.
+ */
+export async function reReconcileReleaseItem(
+  releaseId: string,
+  feedbackItemId: string,
+  dimensionId: string
+): Promise<void> {
+  const release = await getReleaseContext(releaseId)
+  if (!release) return
+
+  const userIds = getExpectedReleaseUserIds(release)
+  const ownerUserId = getReleaseOwnerUserId(release)
+  const dimensionIds = await getReleaseDimensionIds(release)
+  if (userIds.length !== 2 || !ownerUserId) return
+  if (!dimensionIds.includes(dimensionId)) return
+
+  const group = await prisma.score.findMany({
+    where: { feedbackItemId, dimensionId, userId: { in: userIds }, isReconciled: false },
+    select: { id: true, userId: true, value: true },
+  })
+
+  if (group.length === 2 && group[0].userId !== group[1].userId) {
+    const agree = group[0].value === group[1].value
+    if (agree) {
+      await prisma.score.upsert({
+        where: {
+          feedbackItemId_userId_dimensionId_isReconciled: {
+            feedbackItemId,
+            userId: ownerUserId,
+            dimensionId,
+            isReconciled: true,
+          },
+        },
+        update: {
+          value: group[0].value,
+          reconciledFrom: `${group[0].id},${group[1].id}`,
+          notes: 'Auto-reconciled (scores matched)',
+        },
+        create: {
+          feedbackItemId,
+          userId: ownerUserId,
+          dimensionId,
+          value: group[0].value,
+          isReconciled: true,
+          reconciledFrom: `${group[0].id},${group[1].id}`,
+          notes: 'Auto-reconciled (scores matched)',
+        },
+      })
+    } else {
+      // Now disagree — remove any stale final so the pair must reconcile again.
+      await prisma.score.deleteMany({
+        where: { feedbackItemId, userId: ownerUserId, dimensionId, isReconciled: true },
+      })
+    }
+  }
+
+  // Re-derive status. A revision can create new discrepancies on an already
+  // COMPLETE release, so we may need to move it back to RECONCILING.
+  const hasOpenWork = await releaseHasOpenReconciliation(release, userIds, ownerUserId, dimensionIds)
+  if (hasOpenWork) {
+    if (release.status !== 'RECONCILING') {
+      await prisma.teamBatchRelease.update({
+        where: { id: releaseId },
+        data: { status: 'RECONCILING' },
+      })
+      await syncBatchStatus(release.batchId)
+    }
+  } else if (release.status === 'RECONCILING') {
+    await maybeCompleteReleaseReconciliation(releaseId)
+  } else if (release.status === 'COMPLETE') {
+    // Everything resolved and already COMPLETE — just keep batch status in sync.
+    await syncBatchStatus(release.batchId)
+  }
+}
+
+/**
+ * True when the release still has at least one unresolved discrepancy (two
+ * members disagree on an item×dimension with no reconciled final) or an open
+ * escalation. Derived live from current raw scores.
+ */
+async function releaseHasOpenReconciliation(
+  release: NonNullable<Awaited<ReturnType<typeof getReleaseContext>>>,
+  userIds: string[],
+  ownerUserId: string,
+  dimensionIds: string[]
+): Promise<boolean> {
+  const rawScores = await prisma.score.findMany({
+    where: {
+      feedbackItem: { batchId: release.batchId },
+      userId: { in: userIds },
+      dimensionId: { in: dimensionIds },
+      isReconciled: false,
+    },
+    select: { feedbackItemId: true, dimensionId: true, userId: true, value: true },
+  })
+  const groups = new Map<string, { userId: string; value: number }[]>()
+  for (const s of rawScores) {
+    const key = `${s.feedbackItemId}::${s.dimensionId}`
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key)!.push({ userId: s.userId, value: s.value })
+  }
+  const discrepantKeys = new Set<string>()
+  for (const [key, g] of groups) {
+    if (g.length === 2 && g[0].userId !== g[1].userId && g[0].value !== g[1].value) {
+      discrepantKeys.add(key)
+    }
+  }
+  if (discrepantKeys.size > 0) {
+    const reconciled = await prisma.score.findMany({
+      where: {
+        feedbackItem: { batchId: release.batchId },
+        userId: ownerUserId,
+        dimensionId: { in: dimensionIds },
+        isReconciled: true,
+      },
+      select: { feedbackItemId: true, dimensionId: true },
+    })
+    const reconciledKeys = new Set(
+      reconciled.map((r) => `${r.feedbackItemId}::${r.dimensionId}`)
+    )
+    for (const key of discrepantKeys) {
+      if (!reconciledKeys.has(key)) return true
+    }
+  }
+  const openEscalations = await prisma.escalation.count({
+    where: { teamReleaseId: release.id, resolvedAt: null },
+  })
+  return openEscalations > 0
+}
+
 export async function maybeCompleteReleaseReconciliation(
   releaseId: string
 ): Promise<boolean> {

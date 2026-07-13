@@ -44,7 +44,7 @@ import {
   getOptimalFlag,
   isAppropriateFeedbackDecision,
 } from '@/lib/optimal-indicator'
-import { QUILL_FEEDBACK_RUBRIC_V11 } from '@/lib/rubric-templates'
+import { QUILL_FEEDBACK_RUBRIC } from '@/lib/rubric-templates'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -153,11 +153,20 @@ export function EvaluateClient({
   userName,
   batchId,
   batchType,
+  reviseDimensionId,
+  reviseBatchName,
 }: {
   projectId: string
   userName: string
   batchId?: string
   batchType?: string
+  // When set, this is the "re-open one criterion" flow: the rubric is filtered
+  // to just this dimension and saves are routed through the revise endpoint
+  // (which allows editing a closed/reconciling batch). Everything else — the
+  // numbered nav, notes, auto-save, Continue/auto-advance — is the normal
+  // scoring UI, so it feels identical to the original scoring session.
+  reviseDimensionId?: string
+  reviseBatchName?: string
 }) {
   const router = useRouter()
 
@@ -253,6 +262,11 @@ export function EvaluateClient({
         )
       }
 
+      // Revise mode: expose ONLY the single re-opened criterion for scoring.
+      if (reviseDimensionId) {
+        projectData.rubric = allRubric.filter((d) => d.id === reviseDimensionId)
+      }
+
       // Sort items by displayOrder (nulls last), then by id for stable ordering
       itemsData.sort((a, b) => {
         const aOrd = a.displayOrder ?? Number.MAX_SAFE_INTEGER
@@ -317,7 +331,7 @@ export function EvaluateClient({
     } finally {
       setLoading(false)
     }
-  }, [projectId, batchId, batchType])
+  }, [projectId, batchId, batchType, reviseDimensionId])
 
   useEffect(() => {
     fetchData()
@@ -344,6 +358,49 @@ export function EvaluateClient({
 
   const allDimensionsScored =
     currentScoreState?.scores.every((s) => s.value !== null) ?? false
+
+  // Persist one item's scores. In revise mode, saves go to the revise endpoint
+  // (which allows editing a closed/reconciling batch and only re-derives
+  // reconciliation when a value actually changed); otherwise the normal
+  // /api/scores upsert. Returns true on success.
+  const persistItemScores = useCallback(
+    async (payload: {
+      feedbackItemId: string
+      scores: { dimensionId: string; value: number }[]
+      notes?: string
+      startedAt?: string
+    }): Promise<boolean> => {
+      if (reviseDimensionId && batchId) {
+        const results = await Promise.all(
+          payload.scores.map((s) =>
+            fetch(`/api/projects/${projectId}/batches/${batchId}/revise`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                feedbackItemId: payload.feedbackItemId,
+                dimensionId: s.dimensionId,
+                value: s.value,
+                notes: payload.notes,
+              }),
+            }).then((r) => r.ok)
+          )
+        )
+        return results.every(Boolean)
+      }
+      const res = await fetch('/api/scores', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          feedbackItemId: payload.feedbackItemId,
+          scores: payload.scores,
+          notes: payload.notes,
+          startedAt: payload.startedAt,
+        }),
+      })
+      return res.ok
+    },
+    [reviseDimensionId, batchId, projectId]
+  )
 
   // ---------------------------------------------------------------------------
   // Auto-save: debounced 1s after any score or notes change
@@ -378,18 +435,14 @@ export function EvaluateClient({
           .filter((s) => s.value !== null)
           .map((s) => ({ dimensionId: s.dimensionId, value: s.value! }))
 
-        const res = await fetch('/api/scores', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            feedbackItemId: currentItem.id,
-            scores: scoresToSave,
-            notes: currentScoreState.notes || undefined,
-            startedAt: currentScoreState.startedAt || undefined,
-          }),
+        const ok = await persistItemScores({
+          feedbackItemId: currentItem.id,
+          scores: scoresToSave,
+          notes: currentScoreState.notes || undefined,
+          startedAt: currentScoreState.startedAt || undefined,
         })
 
-        if (res.ok) {
+        if (ok) {
           lastSavedRef.current = snapshot
           setSaveStatus('saved')
         } else {
@@ -407,7 +460,7 @@ export function EvaluateClient({
         clearTimeout(autoSaveTimerRef.current)
       }
     }
-  }, [currentItem, currentScoreState])
+  }, [currentItem, currentScoreState, persistItemScores])
 
   // Reset save status when navigating to a new item
   useEffect(() => {
@@ -478,26 +531,21 @@ export function EvaluateClient({
     try {
       const startedAt = currentScoreState.startedAt ?? new Date().toISOString()
 
-      // Force-save via PUT (upsert) with timing data
-      const res = await fetch('/api/scores', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          feedbackItemId: currentItem.id,
-          scores: currentScoreState.scores
-            .filter((s) => s.value !== null)
-            .map((s) => ({
-              dimensionId: s.dimensionId,
-              value: s.value!,
-            })),
-          notes: currentScoreState.notes || undefined,
-          startedAt,
-        }),
+      // Force-save (upsert) with timing data
+      const ok = await persistItemScores({
+        feedbackItemId: currentItem.id,
+        scores: currentScoreState.scores
+          .filter((s) => s.value !== null)
+          .map((s) => ({
+            dimensionId: s.dimensionId,
+            value: s.value!,
+          })),
+        notes: currentScoreState.notes || undefined,
+        startedAt,
       })
 
-      if (!res.ok) {
-        const errText = await res.text()
-        throw new Error(`Save failed: ${errText}`)
+      if (!ok) {
+        throw new Error('Save failed')
       }
 
       // Mark saved
@@ -601,7 +649,9 @@ export function EvaluateClient({
   // Completion screen
   // ---------------------------------------------------------------------------
 
-  if (allComplete && !reviewing) {
+  // Revise mode always lands directly in the scoring UI: every item is already
+  // scored, so the "All Items Scored" completion screen would otherwise block it.
+  if (allComplete && !reviewing && !reviseDimensionId) {
     return (
       <AppShell defaultCollapsed>
         <div className="flex min-h-screen items-center justify-center">
@@ -674,6 +724,23 @@ export function EvaluateClient({
             </div>
             <Badge variant="secondary">{userName}</Badge>
           </div>
+
+          {reviseDimensionId && (
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2 text-sm">
+              <Badge
+                variant="outline"
+                className="border-warning/40 bg-warning/10 text-warning"
+              >
+                Re-opened for revision
+              </Badge>
+              <span className="text-muted-foreground">
+                {reviseBatchName ? `${reviseBatchName} — ` : ''}editing only{' '}
+                <span className="font-medium text-foreground">
+                  {project.rubric[0]?.label}
+                </span>
+              </span>
+            </div>
+          )}
 
           {/* Progress bar */}
           <div className="flex items-center gap-3">
@@ -828,7 +895,7 @@ export function EvaluateClient({
                     <div className="flex-1 overflow-y-auto px-6 py-5">
                       <div className="mb-5 rounded-xl border bg-muted/30 p-4 text-sm">
                         <div className="font-medium text-foreground">
-                          Rubric {QUILL_FEEDBACK_RUBRIC_V11.version}
+                          Rubric {QUILL_FEEDBACK_RUBRIC.version}
                         </div>
                         <div className="mt-2 space-y-1 text-muted-foreground">
                           <p>Student work:</p>

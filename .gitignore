@@ -47,3 +47,6 @@ next-env.d.ts
 
 # local session handoff (not for shared repo)
 /handoff.md
+
+# Database backups (may contain production PII — never commit)
+backups/
