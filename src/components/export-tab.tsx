@@ -58,9 +58,9 @@ const KIND_OPTIONS: {
   },
   {
     value: 'final-by-scorer',
-    title: 'Final scores — one row per scorer',
+    title: 'Final scores — one row per scoring team',
     description:
-      'The same final values, still split by team and scorer. One row per annotator per item.',
+      'Each team’s final value for its own criteria. A double-scored pair’s agreed value appears once, not once per annotator.',
   },
   {
     value: 'raw-by-scorer',
@@ -318,6 +318,18 @@ export function ExportTab({
               Training batches are excluded — every team scores the same items,
               so one item has one final value per team and cannot collapse to a
               single row. Use either per-scorer export for training data.
+            </p>
+          )}
+          {kind === 'final-by-scorer' && (
+            <p className="mt-2 text-xs text-muted-foreground">
+              On a reconciled row,{' '}
+              <span className="font-medium text-foreground">
+                Evaluator_Email
+              </span>{' '}
+              is the team&apos;s first member alphabetically and{' '}
+              <span className="font-medium text-foreground">Scoring_Role</span>{' '}
+              always reads &ldquo;Scorer A&rdquo; — they identify the team, not
+              who chose the value. Group by team, not by annotator.
             </p>
           )}
         </div>
