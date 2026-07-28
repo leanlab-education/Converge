@@ -212,10 +212,63 @@ src/
 5. Navigation: numbered circles show scored / current / unscored (semantic color tokens)
 6. Timing: records `startedAt` and `durationSeconds` per item
 
-### Export
-- Admin exports CSV from project detail page (Export tab)
-- Export **reveals** `feedbackSource` (AI/HUMAN) — this is the unblinding step
-- Output columns: all input columns in original order, then `Score_ID, Evaluator_ID, Criterion_1…Criterion_N` (dimension labels as headers)
+### Export (redesigned 2026-07-28)
+
+Admin exports CSV from the project detail page (Export tab). Export **reveals**
+`feedbackSource` (AI/HUMAN) — this is the unblinding step.
+
+There are **three score tables plus one QA report**. The tables differ along two
+axes — row *grain* and *raw vs final* — so `type` is a single self-describing
+enum rather than two params with an impossible combination (one row per item ×
+every raw score can't exist: two annotators' values don't fit one cell).
+
+| `type` | Row grain | Scores | Notes |
+|---|---|---|---|
+| `raw-by-scorer` | item × scorer | every score as entered | for IRR. Legacy alias: `original` |
+| `final-by-scorer` | item × scorer | final values | Legacy alias: `reconciled` |
+| `final-by-item` | one per `Feedback_ID` | final values | the "collapsed" export, for CZI handoff (Amber, 2026-07-28) |
+| `discrepancies` | item × criterion | both raw values + diff | batch-scoped QA report, own shape |
+
+- **Legacy aliases are permanent** — `original` and `reconciled` still resolve, so
+  bookmarked URLs and scripts keep working. Verified byte-identical to the
+  pre-refactor output on live data for both types.
+- **"Final" per (item × dimension)** = the `isReconciled` Score row if one exists
+  (auto-reconciled, pair-reconciled, *or* adjudicator-resolved — the adjudicate
+  route writes under the same release-owner userId), otherwise the lone raw score
+  in a non-double-scored regular batch.
+- **`final-by-item` excludes TRAINING batches.** There every team scores every
+  criterion, so an item holds one final value *per team* and cannot collapse to
+  one row. Training data stays available in both scorer-grain exports.
+- **`final-by-item` scope**: released batches only (`Batch.status ≠ DRAFT`).
+  Released-but-unscored items appear as rows with blank criterion cells, which is
+  what makes the completeness filters meaningful.
+- **Two independent completeness filters** (item-grain only; disabled with a
+  reason on the other kinds):
+  - `completeItemsOnly=1` — every rubric dimension has a final value.
+  - `finalizedBatchesOnly=1` — `Batch.status === 'COMPLETE'`, which holds exactly
+    when every team release completed (everyone scored, all discrepancies
+    reconciled, all escalations adjudicated).
+
+**Code layout** — do not put query logic back in the route:
+- `src/lib/export.ts` — pure, no Prisma: kind parsing, column definitions, row
+  builders, `csvEscape`, filenames. Unit-tested in `export.test.ts`, which pins
+  the exact column order for both grains.
+- `src/lib/export-query.ts` — Prisma queries + scope rules, shared by the
+  download and count routes so they can't drift.
+- `src/app/api/export/route.ts` — auth + dispatch only.
+- `src/app/api/export/count/route.ts` — `{rowCount, columnCount}` for the Export
+  tab's summary line; column count is derived from the same header builders.
+- `src/components/export-tab.tsx` — the UI.
+
+**Column layout**
+- Item grain: 12 input columns, `Batch_Name, Batch_Type, Double_Scored`, then the
+  criteria (dimension **labels** as headers, in `sortOrder`). For the 8-criterion
+  Quill rubric that puts criteria at columns P–W, matching Amber's template
+  `scores_reconciled_feedback_level_COLLAPSED.xlsx`.
+- Scorer grain: the same 12, then `Score_ID, Evaluator_Email, Scoring_Role,
+  Team_Name`, then the batch columns, criteria, `Notes, Timestamp`.
+- `Student_Text` / `Feedback_Text` may contain newlines; they're RFC-4180 quoted,
+  so consumers must parse records rather than split on `\n`.
 
 ## Default Rubric
 

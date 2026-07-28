@@ -1,6 +1,12 @@
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { canAdminProject } from '@/lib/authorization'
+import { buildExportFilename, csvEscape, parseExportKind, toCsv } from '@/lib/export'
+import {
+  buildExportCsv,
+  getProjectDimensions,
+  parseExportScope,
+} from '@/lib/export-query'
 import { NextRequest, NextResponse } from 'next/server'
 
 export async function GET(request: NextRequest) {
@@ -9,282 +15,68 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const projectId = request.nextUrl.searchParams.get('projectId')
-  const type = request.nextUrl.searchParams.get('type') || 'original'
-  const activityId = request.nextUrl.searchParams.get('activityId')
-  const conjunctionId = request.nextUrl.searchParams.get('conjunctionId')
+  const params = request.nextUrl.searchParams
+  const projectId = params.get('projectId')
+  const kind = parseExportKind(params.get('type'))
 
   if (!projectId) {
-    return NextResponse.json(
-      { error: 'projectId is required' },
-      { status: 400 }
-    )
+    return NextResponse.json({ error: 'projectId is required' }, { status: 400 })
   }
 
   if (!(await canAdminProject(session.user.id, session.user.role, projectId))) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
-  if (type !== 'original' && type !== 'reconciled' && type !== 'discrepancies') {
+  if (!kind) {
     return NextResponse.json(
-      { error: 'type must be "original", "reconciled", or "discrepancies"' },
+      {
+        error:
+          'type must be "raw-by-scorer", "final-by-scorer", "final-by-item", or "discrepancies"',
+      },
       { status: 400 }
     )
   }
 
-  // Discrepancy export requires a batchId
-  const batchId = request.nextUrl.searchParams.get('batchId')
-  if (type === 'discrepancies' && !batchId) {
-    return NextResponse.json(
-      { error: 'batchId is required for discrepancy export' },
-      { status: 400 }
-    )
+  // The discrepancy report is batch-scoped and has its own shape.
+  if (kind === 'discrepancies') {
+    const batchId = params.get('batchId')
+    if (!batchId) {
+      return NextResponse.json(
+        { error: 'batchId is required for discrepancy export' },
+        { status: 400 }
+      )
+    }
+    return handleDiscrepancyExport(projectId, batchId)
   }
 
-  if (type === 'discrepancies') {
-    return handleDiscrepancyExport(projectId, batchId!)
-  }
+  const { dimensionKeys, dimensionLabels } =
+    await getProjectDimensions(projectId)
 
-  // Get rubric dimensions for column headers
-  const dimensions = await prisma.rubricDimension.findMany({
-    where: { projectId },
-    orderBy: { sortOrder: 'asc' },
-  })
-
-  if (dimensions.length === 0) {
+  if (dimensionKeys.length === 0) {
     return NextResponse.json(
       { error: 'No rubric dimensions found for this project' },
       { status: 404 }
     )
   }
 
-  // Get all scores for this project with full feedback item data
-  const scores = await prisma.score.findMany({
-    where: {
-      feedbackItem: {
-        projectId,
-        ...(activityId ? { activityId } : {}),
-        ...(conjunctionId ? { conjunctionId } : {}),
-      },
-      // "Reconciled" = the final score per item: the reconciled/adjudicated row
-      // for double-scored & training batches, plus the lone score for
-      // single-scored regular batches (which never reconcile). "Original" =
-      // every raw score, one row per evaluator.
-      ...(type === 'reconciled'
-        ? {
-            OR: [
-              { isReconciled: true },
-              {
-                isReconciled: false,
-                feedbackItem: { batch: { type: 'REGULAR', isDoubleScored: false } },
-              },
-            ],
-          }
-        : { isReconciled: false }),
-    },
-    include: {
-      feedbackItem: {
-        select: {
-          responseId: true,
-          studentId: true,
-          cycleId: true,
-          activityId: true,
-          conjunctionId: true,
-          studentText: true,
-          feedbackSource: true,
-          teacherId: true,
-          feedbackText: true,
-          optimal: true,
-          feedbackType: true,
-          feedbackId: true,
-          batchId: true,
-          batch: {
-            select: { name: true, type: true, isDoubleScored: true },
-          },
-        },
-      },
-      user: {
-        select: { email: true, id: true },
-      },
-      dimension: {
-        select: { key: true },
-      },
-    },
-    orderBy: [{ feedbackItemId: 'asc' }, { userId: 'asc' }],
-  })
+  const scope = parseExportScope(params, projectId)
+  const { header, rows } = await buildExportCsv(
+    kind,
+    scope,
+    dimensionKeys,
+    dimensionLabels
+  )
 
-  // Look up team membership and batch assignment roles
-  const teamMemberships = await prisma.evaluatorTeamMember.findMany({
-    where: { team: { projectId } },
-    include: {
-      team: { select: { name: true } },
-    },
-  })
+  const filename = buildExportFilename(
+    kind,
+    scope,
+    new Date().toISOString().split('T')[0]
+  )
 
-  const teamByUserId = new Map<string, string>()
-  for (const tm of teamMemberships) {
-    teamByUserId.set(tm.userId, tm.team.name)
-  }
+  return csvResponse(toCsv(header, rows), filename)
+}
 
-  const batchAssignments = await prisma.batchAssignment.findMany({
-    where: { batch: { projectId } },
-  })
-
-  // Map (batchId, userId) → scoringRole
-  const roleMap = new Map<string, string>()
-  for (const ba of batchAssignments) {
-    roleMap.set(`${ba.batchId}::${ba.userId}`, ba.scoringRole)
-  }
-
-  // Group scores by (feedbackItemId + userId) to build wide-format rows
-  let scoreCounter = 0
-  const rowMap = new Map<
-    string,
-    {
-      scoreId: string
-      responseId: string | null
-      studentId: string
-      cycleId: string | null
-      activityId: string | null
-      conjunctionId: string | null
-      studentText: string
-      feedbackSource: string
-      teacherId: string | null
-      feedbackText: string
-      optimal: string | null
-      feedbackType: string | null
-      feedbackId: string
-      evaluatorEmail: string
-      scoringRole: string
-      teamName: string
-      batchName: string
-      batchType: string
-      doubleScored: boolean
-      notes: string
-      timestamp: Date
-      dimensionScores: Record<string, number>
-    }
-  >()
-
-  for (const score of scores) {
-    const rowKey = `${score.feedbackItemId}::${score.userId}`
-    if (!rowMap.has(rowKey)) {
-      scoreCounter++
-      const batchId = score.feedbackItem.batchId
-      const userId = score.user.id
-      // Surface the symmetric "Scorer A/B" labels instead of the internal
-      // PRIMARY/DOUBLE enum — the two scorers in a double-scored pair score
-      // independently, so the names shouldn't imply a sequence or hierarchy.
-      const rawRole = batchId ? roleMap.get(`${batchId}::${userId}`) || '' : ''
-      const scoringRole =
-        rawRole === 'PRIMARY'
-          ? 'Scorer A'
-          : rawRole === 'DOUBLE'
-            ? 'Scorer B'
-            : rawRole
-
-      rowMap.set(rowKey, {
-        scoreId: `S${String(scoreCounter).padStart(3, '0')}`,
-        responseId: score.feedbackItem.responseId,
-        studentId: score.feedbackItem.studentId,
-        cycleId: score.feedbackItem.cycleId,
-        activityId: score.feedbackItem.activityId,
-        conjunctionId: score.feedbackItem.conjunctionId,
-        studentText: score.feedbackItem.studentText,
-        feedbackSource: score.feedbackItem.feedbackSource,
-        teacherId: score.feedbackItem.teacherId,
-        feedbackText: score.feedbackItem.feedbackText,
-        optimal: score.feedbackItem.optimal,
-        feedbackType: score.feedbackItem.feedbackType,
-        feedbackId: score.feedbackItem.feedbackId,
-        evaluatorEmail: score.user.email,
-        scoringRole,
-        teamName: teamByUserId.get(userId) || '',
-        batchName: score.feedbackItem.batch?.name || '',
-        batchType: score.feedbackItem.batch?.type || '',
-        doubleScored: score.feedbackItem.batch?.isDoubleScored ?? false,
-        notes: score.notes ?? '',
-        timestamp: score.scoredAt,
-        dimensionScores: {},
-      })
-    }
-    const row = rowMap.get(rowKey)!
-    row.dimensionScores[score.dimension.key] = score.value
-    // Notes can live on any one of an item/user's per-dimension rows; keep the
-    // first non-empty. Timestamp = the most recent score for that item/user.
-    if (!row.notes && score.notes) row.notes = score.notes
-    if (score.scoredAt > row.timestamp) row.timestamp = score.scoredAt
-  }
-
-  // Build CSV — new output format: input columns + Score_ID, Evaluator_ID, criteria
-  const dimensionKeys = dimensions.map((d) => d.key)
-  const dimensionLabels = dimensions.map((d) => d.label)
-
-  const headerRow = [
-    'Response_ID',
-    'Student_ID',
-    'Cycle_ID',
-    'Activity_ID',
-    'Conjunction_ID',
-    'Student_Text',
-    'Feedback_Source',
-    'Teacher_ID',
-    'Feedback_Text',
-    'optimal',
-    'feedback_type',
-    'Feedback_ID',
-    'Score_ID',
-    'Evaluator_Email',
-    'Scoring_Role',
-    'Team_Name',
-    'Batch_Name',
-    'Batch_Type',
-    'Double_Scored',
-    ...dimensionLabels,
-    'Notes',
-    'Timestamp',
-  ]
-
-  const csvRows = [headerRow.join(',')]
-
-  for (const row of rowMap.values()) {
-    const values = [
-      csvEscape(row.responseId || ''),
-      csvEscape(row.studentId),
-      csvEscape(row.cycleId || ''),
-      csvEscape(row.activityId || ''),
-      csvEscape(row.conjunctionId || ''),
-      csvEscape(row.studentText),
-      row.feedbackSource,
-      csvEscape(row.teacherId || ''),
-      csvEscape(row.feedbackText),
-      csvEscape(row.optimal || ''),
-      csvEscape(row.feedbackType || ''),
-      csvEscape(row.feedbackId),
-      csvEscape(row.scoreId),
-      csvEscape(row.evaluatorEmail),
-      csvEscape(row.scoringRole),
-      csvEscape(row.teamName),
-      csvEscape(row.batchName),
-      csvEscape(row.batchType),
-      row.doubleScored ? 'Yes' : 'No',
-      ...dimensionKeys.map((key) =>
-        row.dimensionScores[key] !== undefined
-          ? String(row.dimensionScores[key])
-          : ''
-      ),
-      csvEscape(row.notes),
-      row.timestamp.toISOString(),
-    ]
-    csvRows.push(values.join(','))
-  }
-
-  const csv = csvRows.join('\n')
-  const filterParts = [type]
-  if (activityId) filterParts.push(`activity-${activityId}`)
-  if (conjunctionId) filterParts.push(`conj-${conjunctionId}`)
-  const filename = `scores-${filterParts.join('-')}-${new Date().toISOString().split('T')[0]}.csv`
-
+function csvResponse(csv: string, filename: string) {
   return new Response(csv, {
     status: 200,
     headers: {
@@ -293,6 +85,10 @@ export async function GET(request: NextRequest) {
     },
   })
 }
+
+// ---------------------------------------------------------------------------
+// Discrepancy report (behaviour unchanged)
+// ---------------------------------------------------------------------------
 
 async function handleDiscrepancyExport(projectId: string, batchId: string) {
   const batch = await prisma.batch.findUnique({
@@ -403,7 +199,7 @@ async function handleDiscrepancyExport(projectId: string, batchId: string) {
     'Difference',
   ]
 
-  const csvRows = [headerRow.join(',')]
+  const csvRows: string[][] = []
 
   for (const [, group] of groups) {
     const evals = group.evaluators
@@ -417,47 +213,27 @@ async function handleDiscrepancyExport(projectId: string, batchId: string) {
     const reconciliationNotes =
       reconciliationNotesByItem.get(group.feedbackItemId) || ''
 
-    csvRows.push(
-      [
-        csvEscape(group.feedbackItem.responseId || ''),
-        csvEscape(group.feedbackItem.studentId),
-        csvEscape(group.feedbackItem.activityId || ''),
-        csvEscape(group.feedbackItem.conjunctionId || ''),
-        csvEscape(group.feedbackItem.feedbackId),
-        csvEscape(group.dimension.key),
-        csvEscape(group.dimension.label),
-        csvEscape(evals[0].email),
-        String(evals[0].value),
-        csvEscape(notesA),
-        csvEscape(evals[1].email),
-        String(evals[1].value),
-        csvEscape(notesB),
-        csvEscape(reconciliationNotes),
-        String(Math.abs(evals[0].value - evals[1].value)),
-      ].join(',')
-    )
+    csvRows.push([
+      csvEscape(group.feedbackItem.responseId || ''),
+      csvEscape(group.feedbackItem.studentId),
+      csvEscape(group.feedbackItem.activityId || ''),
+      csvEscape(group.feedbackItem.conjunctionId || ''),
+      csvEscape(group.feedbackItem.feedbackId),
+      csvEscape(group.dimension.key),
+      csvEscape(group.dimension.label),
+      csvEscape(evals[0].email),
+      String(evals[0].value),
+      csvEscape(notesA),
+      csvEscape(evals[1].email),
+      String(evals[1].value),
+      csvEscape(notesB),
+      csvEscape(reconciliationNotes),
+      String(Math.abs(evals[0].value - evals[1].value)),
+    ])
   }
 
-  const csv = csvRows.join('\n')
   const safeBatchName = (batch.name || 'batch').replace(/[^a-zA-Z0-9_-]/g, '-')
   const filename = `discrepancies-${safeBatchName}-${new Date().toISOString().split('T')[0]}.csv`
 
-  return new Response(csv, {
-    status: 200,
-    headers: {
-      'Content-Type': 'text/csv',
-      'Content-Disposition': `attachment; filename="${filename}"`,
-    },
-  })
-}
-
-function csvEscape(value: string): string {
-  // Defend against CSV formula injection — prefix dangerous leading characters
-  if (/^[=+\-@\t\r]/.test(value)) {
-    value = `'${value}`
-  }
-  if (value.includes(',') || value.includes('"') || value.includes('\n')) {
-    return `"${value.replace(/"/g, '""')}"`
-  }
-  return value
+  return csvResponse(toCsv(headerRow, csvRows), filename)
 }

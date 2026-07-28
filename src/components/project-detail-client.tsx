@@ -32,7 +32,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   Plus,
   Upload,
-  Download,
   Loader2,
   ArrowLeft,
   CheckCircle,
@@ -49,6 +48,7 @@ import { FeedbackItemsTab, type FeedbackItemRow } from '@/components/feedback-it
 import { UserAvatar } from '@/components/user-avatar'
 import { displayAnnotatorName } from '@/lib/generate-name'
 import { OverviewTab } from '@/components/overview-tab'
+import { ExportTab } from '@/components/export-tab'
 import { Progress } from '@/components/ui/progress'
 import { formatDuration, type Period } from '@/lib/activity-tracker-config'
 
@@ -241,11 +241,6 @@ export function ProjectDetailClient({
   const [teamPickerSaving, setTeamPickerSaving] = useState(false)
   const [teamPickerError, setTeamPickerError] = useState('')
   const [evalInitialTeamId, setEvalInitialTeamId] = useState<string>('')
-
-  // Export filters
-  const [exportActivity, setExportActivity] = useState('')
-  const [exportConjunction, setExportConjunction] = useState('')
-  const [discrepancyBatchId, setDiscrepancyBatchId] = useState('')
 
   // Annotator activity time
   const [timePeriod, setTimePeriod] = useState<Period>('month')
@@ -469,13 +464,6 @@ export function ProjectDetailClient({
     } finally {
       setTeamPickerSaving(false)
     }
-  }
-
-  function handleExport(type: 'original' | 'reconciled') {
-    const params = new URLSearchParams({ projectId, type })
-    if (exportActivity) params.set('activityId', exportActivity)
-    if (exportConjunction) params.set('conjunctionId', exportConjunction)
-    window.open(`/api/export?${params.toString()}`, '_blank')
   }
 
   // ---------------------------------------------------------------------------
@@ -984,168 +972,17 @@ export function ProjectDetailClient({
             <div className="border-t border-border" />
 
             {/* Export section */}
-            <div className="space-y-6">
-            <div>
-              <h2 className="text-lg font-semibold">Export</h2>
-              <p className="text-sm text-muted-foreground mt-1">
-                Download evaluation scores as CSV files for analysis.
-              </p>
-            </div>
-
-            {/* Export filters */}
-            {(() => {
-              const expActivityIds = [...new Set(batches.map((b) => b.activityId).filter(Boolean) as string[])].sort()
-              const expConjunctionIds = [...new Set(
-                batches
-                  .filter((b) => (exportActivity ? b.activityId === exportActivity : true))
-                  .map((b) => b.conjunctionId)
-                  .filter(Boolean) as string[]
-              )].sort()
-              return (
-                <div className="flex items-center gap-3">
-                  <span className="text-sm font-medium text-muted-foreground">Filter:</span>
-                  <select
-                    className="flex h-8 rounded-md border border-input bg-background px-2 py-1 text-sm shadow-sm transition-colors"
-                    value={exportActivity}
-                    onChange={(e) => {
-                      setExportActivity(e.target.value)
-                      setExportConjunction('')
-                    }}
-                  >
-                    <option value="">All activities</option>
-                    {expActivityIds.map((id) => (
-                      <option key={id} value={id}>Activity {id}</option>
-                    ))}
-                  </select>
-                  <select
-                    className="flex h-8 rounded-md border border-input bg-background px-2 py-1 text-sm shadow-sm transition-colors"
-                    value={exportConjunction}
-                    onChange={(e) => setExportConjunction(e.target.value)}
-                  >
-                    <option value="">All conjunctions</option>
-                    {expConjunctionIds.map((id) => (
-                      <option key={id} value={id}>{id}</option>
-                    ))}
-                  </select>
-                  {(exportActivity || exportConjunction) && (
-                    <button
-                      onClick={() => { setExportActivity(''); setExportConjunction('') }}
-                      className="text-xs text-muted-foreground hover:text-foreground transition-colors"
-                    >
-                      Clear filters
-                    </button>
-                  )}
-                </div>
-              )
-            })()}
-
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-base">Original Scores</CardTitle>
-                  <CardDescription>
-                    Raw scores from each evaluator, one row per evaluator per
-                    feedback item.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <p className="mb-4 text-xs text-muted-foreground">
-                    Columns: feedback_ID, evaluator_email,{' '}
-                    {project.rubric.map((d) => d.label).join(', ')}, notes,
-                    feedback_source, timestamp
-                  </p>
-                  <Button
-                    variant="outline"
-                    onClick={() => handleExport('original')}
-                  >
-                    <Download className="mr-2 h-4 w-4" />
-                    Export Original CSV
-                  </Button>
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-base">
-                    Reconciled Scores
-                  </CardTitle>
-                  <CardDescription>
-                    The final score for every item: the reconciled/adjudicated
-                    value for double-scored batches, plus the single score for
-                    independent batches.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <p className="mb-4 text-xs text-muted-foreground">
-                    Columns: feedback_ID, evaluator_email,{' '}
-                    {project.rubric.map((d) => d.label).join(', ')}, notes,
-                    feedback_source, timestamp
-                  </p>
-                  <Button
-                    variant="outline"
-                    onClick={() => handleExport('reconciled')}
-                  >
-                    <Download className="mr-2 h-4 w-4" />
-                    Export Reconciled CSV
-                  </Button>
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-base">
-                    Discrepancy Report
-                  </CardTitle>
-                  <CardDescription>
-                    Pre-reconciliation report of all scoring differences between evaluators.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <p className="mb-4 text-xs text-muted-foreground">
-                    Columns: feedback_ID, dimension, evaluator_A_score,
-                    evaluator_B_score, difference
-                  </p>
-                  {(() => {
-                    const reconcilingBatches = batches.filter(
-                      (b) => b.status === 'RECONCILING' || b.status === 'COMPLETE'
-                    )
-                    if (reconcilingBatches.length === 0) {
-                      return (
-                        <p className="text-xs text-muted-foreground italic">
-                          No batches in reconciliation or complete status.
-                        </p>
-                      )
-                    }
-                    return (
-                      <div className="flex flex-col gap-3">
-                        <select
-                          className="flex h-8 rounded-md border border-input bg-background px-2 py-1 text-sm shadow-sm transition-colors"
-                          value={discrepancyBatchId}
-                          onChange={(e) => setDiscrepancyBatchId(e.target.value)}
-                        >
-                          <option value="">Select batch...</option>
-                          {reconcilingBatches.map((b) => (
-                            <option key={b.id} value={b.id}>{b.name}</option>
-                          ))}
-                        </select>
-                        <Button
-                          variant="outline"
-                          disabled={!discrepancyBatchId}
-                          onClick={() => {
-                            const params = new URLSearchParams({ projectId, type: 'discrepancies', batchId: discrepancyBatchId })
-                            window.open(`/api/export?${params.toString()}`, '_blank')
-                          }}
-                        >
-                          <Download className="mr-2 h-4 w-4" />
-                          Export Discrepancies CSV
-                        </Button>
-                      </div>
-                    )
-                  })()}
-                </CardContent>
-              </Card>
-            </div>
-            </div>
+            <ExportTab
+              projectId={projectId}
+              rubricLabels={project.rubric.map((d) => d.label)}
+              batches={batches.map((b) => ({
+                id: b.id,
+                name: b.name,
+                status: b.status,
+                activityId: b.activityId,
+                conjunctionId: b.conjunctionId,
+              }))}
+            />
           </TabsContent>
         </Tabs>
       </div>
