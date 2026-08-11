@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import {
@@ -22,6 +22,28 @@ interface BatchInfo {
   status: string
   itemCount: number
   scoredCount: number
+  createdAt: string
+  activityId: string | null
+  conjunctionId: string | null
+}
+
+// How the Scoring batch list is grouped. The base order is always
+// chronological (batch createdAt); the only choice is the grouping dimension.
+// (Abi, 2026-07-29)
+type ScoringGroupBy = 'status' | 'activity' | 'date'
+
+// Label a batch's activity. The conjunction (Because/But/So) is appended only
+// when `withConjunction` — i.e. when the same activity appears with more than
+// one conjunction variant, so the label must disambiguate. In the common case
+// (every activity has a single variant) it's noise and stays hidden.
+function activityLabel(
+  batch: BatchInfo,
+  withConjunction: boolean
+): string | null {
+  if (!batch.activityId) return null
+  return `Activity ${batch.activityId}${
+    withConjunction && batch.conjunctionId ? ` (${batch.conjunctionId})` : ''
+  }`
 }
 
 interface ReconcileTask {
@@ -75,6 +97,22 @@ export function EvaluatorProjectPage({
   const router = useRouter()
   const [section, setSection] = useState<'scoring' | 'reconciliation'>('scoring')
   const [reconcileSub, setReconcileSub] = useState<'team' | 'adjudicator'>('team')
+  // Grouping preference persists per project. Read from localStorage after
+  // mount (not in the initializer) so SSR and first client render agree.
+  const [groupBy, setGroupBy] = useState<ScoringGroupBy>('status')
+  useEffect(() => {
+    const stored = localStorage.getItem(`scoring-group-by:${project.id}`)
+    if (stored === 'status' || stored === 'activity' || stored === 'date') {
+      // Hydrate the persisted preference after mount — a lazy initializer would
+      // read localStorage during SSR and mismatch the first client render.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setGroupBy(stored)
+    }
+  }, [project.id])
+  const changeGroupBy = (value: ScoringGroupBy) => {
+    setGroupBy(value)
+    localStorage.setItem(`scoring-group-by:${project.id}`, value)
+  }
 
   const totalItems = batches.reduce((sum, b) => sum + b.itemCount, 0)
   const totalScored = batches.reduce((sum, b) => sum + b.scoredCount, 0)
@@ -200,8 +238,54 @@ export function EvaluatorProjectPage({
                 </p>
               </div>
             ) : (
-              <div className="space-y-3">
-                {batches.map((batch) => {
+              (() => {
+                // Base order is always chronological (server-sorted; re-sorted
+                // here defensively). The toggle only picks the grouping.
+                const sorted = [...batches].sort(
+                  (a, b) =>
+                    a.createdAt.localeCompare(b.createdAt) ||
+                    a.name.localeCompare(b.name)
+                )
+                const isDone = (b: BatchInfo) =>
+                  b.itemCount > 0 && b.scoredCount >= b.itemCount
+
+                // Show the conjunction only for activities that actually have
+                // more than one variant among this annotator's batches — in the
+                // common single-variant case "(Because)" is noise.
+                const conjunctionsByActivity = new Map<string, Set<string>>()
+                for (const b of sorted) {
+                  if (!b.activityId) continue
+                  const set = conjunctionsByActivity.get(b.activityId) ?? new Set()
+                  set.add(b.conjunctionId ?? '')
+                  conjunctionsByActivity.set(b.activityId, set)
+                }
+                const needsConjunction = (b: BatchInfo) =>
+                  b.activityId != null &&
+                  (conjunctionsByActivity.get(b.activityId)?.size ?? 0) > 1
+
+                let groups: { label: string | null; items: BatchInfo[] }[]
+                if (groupBy === 'status') {
+                  const todo = sorted.filter((b) => !isDone(b))
+                  const done = sorted.filter(isDone)
+                  groups = [
+                    { label: `To do (${todo.length})`, items: todo },
+                    { label: `Completed (${done.length})`, items: done },
+                  ].filter((g) => g.items.length > 0)
+                } else if (groupBy === 'activity') {
+                  const byActivity = new Map<string, BatchInfo[]>()
+                  for (const b of sorted) {
+                    const key = activityLabel(b, needsConjunction(b)) ?? 'Other'
+                    byActivity.set(key, [...(byActivity.get(key) ?? []), b])
+                  }
+                  groups = Array.from(byActivity, ([label, items]) => ({
+                    label,
+                    items,
+                  }))
+                } else {
+                  groups = [{ label: null, items: sorted }]
+                }
+
+                const renderBatchCard = (batch: BatchInfo) => {
                   const batchPct =
                     batch.itemCount > 0
                       ? Math.round((batch.scoredCount / batch.itemCount) * 100)
@@ -209,62 +293,108 @@ export function EvaluatorProjectPage({
                   const batchComplete = batchPct === 100
                   const isScoring = batch.status === 'SCORING'
                   const isReconciling = batch.status === 'RECONCILING'
+                  const activity = activityLabel(batch, needsConjunction(batch))
 
                   return (
-                    <Card key={batch.id} className="transition-all duration-200 hover:shadow-sm hover:ring-1 hover:ring-primary/10">
-                      <CardHeader className="pb-2">
-                        <div className="flex items-start justify-between gap-2">
-                          <CardTitle className="text-base">{batch.name}</CardTitle>
-                          <Badge
-                            variant="outline"
-                            className={
-                              isReconciling
-                                ? 'bg-status-reconciliation-bg text-status-reconciliation-text'
-                                : batchComplete
-                                  ? 'bg-status-complete-bg text-status-complete-text'
-                                  : isScoring
-                                    ? 'bg-status-active-bg text-status-active-text'
-                                    : 'text-muted-foreground'
-                            }
-                          >
-                            {isReconciling ? 'Reconciling' : batchComplete ? 'Complete' : isScoring ? 'Open' : 'Not Open'}
-                          </Badge>
-                        </div>
-                        <CardDescription>
-                          {batch.scoredCount} of {batch.itemCount} items scored
-                        </CardDescription>
-                      </CardHeader>
-                      <CardContent>
-                        <div className="flex items-center gap-3">
-                          <Progress value={batchPct} className="flex-1" />
-                          {isReconciling ? (
-                            <Button size="sm" onClick={() => setSection('reconciliation')}>
-                              Reconcile
-                            </Button>
-                          ) : (
-                            <Button
-                              size="sm"
-                              variant={batchComplete ? 'outline' : 'default'}
-                              disabled={!isScoring || batchComplete}
-                              onClick={() =>
-                                router.push(`/evaluate/${project.id}?batchId=${batch.id}`)
+                    <Card key={batch.id} size="sm" className="gap-2 transition-all duration-200 hover:shadow-sm hover:ring-1 hover:ring-primary/10">
+                      <CardContent className="flex items-center justify-between gap-3 px-3">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="truncate text-sm font-medium">{batch.name}</span>
+                            <Badge
+                              variant="outline"
+                              className={
+                                isReconciling
+                                  ? 'bg-status-reconciliation-bg text-status-reconciliation-text'
+                                  : batchComplete
+                                    ? 'bg-status-complete-bg text-status-complete-text'
+                                    : isScoring
+                                      ? 'bg-status-active-bg text-status-active-text'
+                                      : 'text-muted-foreground'
                               }
                             >
-                              {batchComplete
-                                ? 'Done'
-                                : !isScoring
-                                  ? 'Not Open'
-                                  : batch.scoredCount > 0
-                                    ? 'Continue'
-                                    : 'Start'}
-                            </Button>
-                          )}
+                              {isReconciling ? 'Reconciling' : batchComplete ? 'Complete' : isScoring ? 'Open' : 'Not Open'}
+                            </Badge>
+                          </div>
+                          <p className="mt-0.5 text-xs text-muted-foreground">
+                            {batch.scoredCount} of {batch.itemCount} items scored
+                            {activity && groupBy !== 'activity' && ` · ${activity}`}
+                          </p>
                         </div>
+                        {isReconciling ? (
+                          <Button size="sm" className="shrink-0" onClick={() => setSection('reconciliation')}>
+                            Reconcile
+                          </Button>
+                        ) : (
+                          <Button
+                            size="sm"
+                            className="shrink-0"
+                            variant={batchComplete ? 'outline' : 'default'}
+                            disabled={!isScoring || batchComplete}
+                            onClick={() =>
+                              router.push(`/evaluate/${project.id}?batchId=${batch.id}`)
+                            }
+                          >
+                            {batchComplete
+                              ? 'Done'
+                              : !isScoring
+                                ? 'Not Open'
+                                : batch.scoredCount > 0
+                                  ? 'Continue'
+                                  : 'Start'}
+                          </Button>
+                        )}
                       </CardContent>
+                      <Progress value={batchPct} className="mx-3 mb-0.5 h-1 w-auto" />
                     </Card>
                   )
-                })}
-              </div>
+                }
+
+                return (
+                  <>
+                    {batches.length > 1 && (
+                      <div className="mb-3 flex items-center justify-end gap-2">
+                        <span className="text-xs text-muted-foreground">Group by</span>
+                        <div className="flex items-center rounded-lg border border-border bg-muted p-0.5">
+                          {(
+                            [
+                              ['status', 'Status'],
+                              ['activity', 'Activity'],
+                              ['date', 'Date'],
+                            ] as const
+                          ).map(([value, label]) => (
+                            <button
+                              key={value}
+                              onClick={() => changeGroupBy(value)}
+                              className={`rounded-md px-2.5 py-1 text-xs font-medium transition-all duration-200 ${
+                                groupBy === value
+                                  ? 'bg-background text-foreground shadow-sm'
+                                  : 'text-muted-foreground hover:text-foreground'
+                              }`}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <div className="space-y-6">
+                      {groups.map((group) => (
+                        <div key={group.label ?? 'all'}>
+                          {group.label && (
+                            <h2 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                              {group.label}
+                            </h2>
+                          )}
+                          <div className="space-y-3">
+                            {group.items.map(renderBatchCard)}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )
+              })()
             )}
           </>
         ) : (

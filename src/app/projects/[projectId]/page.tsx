@@ -61,7 +61,32 @@ export default async function ProjectPage({
         },
       },
     },
+    // Chronological base order — pending work stays in a predictable place as
+    // the batch list grows (Abi, 2026-07-29).
+    orderBy: { batch: { createdAt: 'asc' } },
   })
+
+  // Each batch is created filtered to one activity ("essay" to annotators) —
+  // derive it from the items so the Scoring list can label and group by it.
+  // Defensive: a hypothetical mixed-activity batch degrades to null (no label).
+  const activityGroups = await prisma.feedbackItem.groupBy({
+    by: ['batchId', 'activityId', 'conjunctionId'],
+    where: { batchId: { in: batchAssignments.map((ba) => ba.batch.id) } },
+  })
+  const activityByBatch = new Map<string, { activityId: string | null; conjunctionId: string | null }>()
+  for (const g of activityGroups) {
+    if (!g.batchId) continue
+    const existing = activityByBatch.get(g.batchId)
+    if (!existing) {
+      activityByBatch.set(g.batchId, {
+        activityId: g.activityId,
+        conjunctionId: g.conjunctionId,
+      })
+    } else {
+      if (existing.activityId !== g.activityId) existing.activityId = null
+      if (existing.conjunctionId !== g.conjunctionId) existing.conjunctionId = null
+    }
+  }
 
   const { itemCountByBatchSlot, scoredCountByBatchSlot } = await loadSlotMaps(
     batchAssignments.map((ba) => ba.batch.id),
@@ -75,6 +100,7 @@ export default async function ProjectPage({
       : 0
     const releaseStatus = ba.teamRelease?.status ?? ba.batch.status
     const releaseId = ba.teamReleaseId ?? null
+    const activity = activityByBatch.get(ba.batch.id)
     return {
       id: ba.batch.id,
       releaseId,
@@ -82,6 +108,9 @@ export default async function ProjectPage({
       status: releaseStatus,
       itemCount,
       scoredCount,
+      createdAt: ba.batch.createdAt.toISOString(),
+      activityId: activity?.activityId ?? null,
+      conjunctionId: activity?.conjunctionId ?? null,
     }
   })
 
