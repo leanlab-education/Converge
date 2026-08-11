@@ -157,6 +157,9 @@ export async function autoReconcileAgreedScoresForRelease(releaseId: string) {
             value: data.value,
             reconciledFrom: data.reconciledFrom,
             notes: data.notes,
+            // A row relabeled as auto-reconciled no longer reflects a human
+            // decision — clear any stale attribution. (Fable review, 2026-08-11)
+            reconciledById: null,
           },
           create: data,
         })
@@ -250,6 +253,8 @@ export async function reReconcileReleaseItem(
           value: group[0].value,
           reconciledFrom: `${group[0].id},${group[1].id}`,
           notes: 'Auto-reconciled (scores matched)',
+          // Relabeled auto — clear stale human attribution. (Fable, 2026-08-11)
+          reconciledById: null,
         },
         create: {
           feedbackItemId,

@@ -58,6 +58,7 @@ export default async function ReconcilePage({
       releaseId={releaseId}
       batchName={release.batch.name}
       userName={session.user.name || session.user.email || 'Annotator'}
+      userId={session.user.id}
     />
   )
 }

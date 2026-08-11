@@ -102,6 +102,15 @@ Because of this split, a pair can **revisit and correct an already-reconciled fi
 
 **The guard is centralized** in `src/lib/reconciliation-access.ts` (`evaluateReconciliationAccess` / `isReconcilableStatus`) — do not re-inline lock/status checks. It's enforced in the reconcile, discrepancies, escalate, adjudicate, and scores routes (unit-tested in `reconciliation-access.test.ts`). Editable/COMPLETE-but-unlocked releases surface on the annotator project page as a **"Review / Edit"** reconcile task.
 
+### Concede-or-escalate reconciliation rule (2026-08-11)
+
+On a discrepancy, the annotator recording the final score **may not record their own original value** — resolving it yourself always means conceding to your partner (or picking a third value on wider scales). To keep your own score: your partner records it, or you escalate. This makes silent no-discussion "reconciliations" and 2-point-scale misclicks inexpressible (Luofan, 2026-07-29).
+
+- **Rule is pure and centralized** in `src/lib/reconcile-concession.ts` (`evaluateConcessionRule`, tested in `reconcile-concession.test.ts`) — enforced server-side in the reconcile route (403, validated in a pre-pass so a rejected save never partially applies) and mirrored in the reconcile UI (own-original option disabled + hint).
+- It deliberately does **not** fire on: agreed dimensions (re-sent on every save), submitters with no original raw score (admins), or **any save where a final is already recorded** — only the *first* recording of a discrepancy is constrained. Editing a recorded final is a deliberate correction (Luofan's misclick-fix case) and may move to any value, including your own original; `reconciledById` makes such flips visible. Comparisons use the **persisted** final, not the local unsaved selection.
+- **`Score.reconciledById`** records who actually performed each reconciliation (pair-reconcile and adjudicate paths). `userId` on a reconciled row is the release-owner storage slot, NOT the actor. Null = pre-2026-08 row or system auto-reconcile.
+- Consequence: if no adjudicator is assigned to a batch, the annotator who wants to keep their own score has no action available (escalate is disabled) — only their partner can close the item. Assign adjudicators.
+
 ## Auth
 
 - **Auth.js v5** with Credentials provider (email + bcrypt password)

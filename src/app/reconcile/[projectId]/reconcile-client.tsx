@@ -159,12 +159,14 @@ export function ReconcileClient({
   releaseId,
   batchName,
   userName,
+  userId,
 }: {
   projectId: string
   batchId: string
   releaseId: string
   batchName: string
   userName: string
+  userId: string
 }) {
   const router = useRouter()
 
@@ -177,6 +179,11 @@ export function ReconcileClient({
   const [itemStates, setItemStates] = useState<Record<string, ItemReconcileState>>({})
   const [saving, setSaving] = useState(false)
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  // Finals as persisted in the DB, keyed `${feedbackItemId}::${dimensionId}`.
+  // Distinct from the local (possibly unsaved) selection in itemStates: the
+  // concede-or-escalate rule below compares against what's actually saved,
+  // mirroring the server, so an unsaved misclick can still be reverted.
+  const [persistedFinals, setPersistedFinals] = useState<Record<string, number>>({})
   const [escalatingDimId, setEscalatingDimId] = useState<string | null>(null)
   // When the pair re-opens a fully-reconciled batch to correct a score, they
   // bypass the "all done" summary screen via this flag.
@@ -188,9 +195,9 @@ export function ReconcileClient({
     value: number
   } | null>(null)
 
-  // Fetch discrepancies on mount
-  useEffect(() => {
-    async function fetchDiscrepancies() {
+  // Fetch discrepancies on mount, and again after a save conflict so the
+  // client re-syncs with what a partner (or adjudicator) changed concurrently.
+  const fetchDiscrepancies = useCallback(async () => {
       try {
         const res = await fetch(
           `/api/projects/${projectId}/batches/${batchId}/discrepancies?releaseId=${releaseId}`
@@ -205,9 +212,12 @@ export function ReconcileClient({
         // Build a lookup of existing reconciled scores so we can restore state
         // on return visits without losing already-saved work.
         const reconciledByKey = new Map<string, ReconciledScore>()
+        const persisted: Record<string, number> = {}
         for (const r of data.reconciledScores ?? []) {
           reconciledByKey.set(`${r.feedbackItemId}::${r.dimensionId}`, r)
+          persisted[`${r.feedbackItemId}::${r.dimensionId}`] = r.value
         }
+        setPersistedFinals(persisted)
 
         // Initialize state for each item - pre-fill agreed + already-reconciled dimensions
         const states: Record<string, ItemReconcileState> = {}
@@ -245,14 +255,19 @@ export function ReconcileClient({
           }
         }
         setItemStates(states)
+        // A refetch can shrink the list (e.g. a partner resolved an item) —
+        // keep the index in range.
+        setCurrentIndex((i) => Math.max(0, Math.min(i, data.items.length - 1)))
       } catch (err) {
         console.error('Failed to load discrepancies:', err)
       } finally {
         setLoading(false)
       }
-    }
-    fetchDiscrepancies()
   }, [projectId, batchId, releaseId])
+
+  useEffect(() => {
+    fetchDiscrepancies()
+  }, [fetchDiscrepancies])
 
   const currentItem = items[currentIndex] ?? null
   const currentState = currentItem ? itemStates[currentItem.feedbackItemId] : null
@@ -483,6 +498,13 @@ export function ReconcileClient({
 
       if (!res.ok) {
         const err = await res.json()
+        // Rule rejections (403), concurrent-edit conflicts (409), and batch
+        // locks (423) carry actionable messages — surface them and re-sync
+        // with the server instead of showing a generic failure.
+        if ([403, 409, 423].includes(res.status)) {
+          alert(err.error || 'Failed to save')
+          await fetchDiscrepancies()
+        }
         throw new Error(err.error || 'Failed to save')
       }
 
@@ -494,6 +516,15 @@ export function ReconcileClient({
           saved: true,
         },
       }))
+      // The saved values are now the persisted finals — the concession rule
+      // keys off these.
+      setPersistedFinals((prev) => {
+        const next = { ...prev }
+        for (const s of scores) {
+          next[`${currentItem.feedbackItemId}::${s.dimensionId}`] = s.value
+        }
+        return next
+      })
       setSaveStatus('saved')
 
       // Advance to next unresolved item
@@ -510,7 +541,7 @@ export function ReconcileClient({
     } finally {
       setSaving(false)
     }
-  }, [currentItem, currentState, allDiscrepanciesScored, projectId, batchId, releaseId, items, currentIndex, itemStates])
+  }, [currentItem, currentState, allDiscrepanciesScored, projectId, batchId, releaseId, items, currentIndex, itemStates, fetchDiscrepancies])
 
   // Loading state
   if (loading) {
@@ -906,14 +937,42 @@ export function ReconcileClient({
                           <div className="mb-1.5 text-xs font-medium text-muted-foreground">
                             Final Score
                           </div>
+                          {(() => {
+                            // Concede-or-escalate (Luofan 2026-07-29): the
+                            // FIRST recording of a discrepancy may not be your
+                            // own original score — only your partner can record
+                            // it. Once a final exists (persisted != null),
+                            // editing is a deliberate correction and every
+                            // value is selectable; the server enforces the
+                            // same rule and records who changed what.
+                            const myOriginal =
+                              disc.evaluatorA.userId === userId
+                                ? disc.evaluatorA.value
+                                : disc.evaluatorB.userId === userId
+                                  ? disc.evaluatorB.value
+                                  : null
+                            const persistedKey = `${currentItem.feedbackItemId}::${disc.dimensionId}`
+                            const persisted = persistedFinals[persistedKey] ?? null
+                            const blockedValue =
+                              myOriginal != null && persisted == null
+                                ? myOriginal
+                                : null
+                            return (
+                              <>
                           <div className="flex flex-wrap gap-2">
                             {scaleOptions.map((val) => {
                               const label = scoreLabels[val]
                               const isSelected = finalValue === val
+                              const isBlocked = val === blockedValue
                               return (
                               <button
                                   key={val}
-                                  disabled={isLocked}
+                                  disabled={isLocked || isBlocked}
+                                  title={
+                                    isBlocked
+                                      ? 'Your original score — your partner records it if you both agree it was right.'
+                                      : undefined
+                                  }
                                   onClick={() =>
                                     handleFinalScoreChange(disc.dimensionId, val)
                                   }
@@ -936,6 +995,16 @@ export function ReconcileClient({
                               )
                             })}
                           </div>
+                                {blockedValue != null && !isLocked && (
+                                  <p className="mt-1.5 text-xs text-muted-foreground">
+                                    You can&apos;t select your own original score.
+                                    If you both agree it was right, your partner
+                                    records it — or escalate below.
+                                  </p>
+                                )}
+                              </>
+                            )
+                          })()}
                         </div>
                         <Button
                           size="sm"

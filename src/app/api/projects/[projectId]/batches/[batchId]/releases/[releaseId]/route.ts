@@ -143,6 +143,17 @@ export async function PATCH(
         { status: 400 }
       )
     }
+    // The adjudicator is the tiebreaker for THIS pair's escalations — a member
+    // of the pair adjudicating their own disputes would let them escalate and
+    // then self-resolve to their own score, bypassing the concede-or-escalate
+    // rule. Peer annotators from other teams remain allowed (Amber 2026-06-18).
+    // (Fable review, 2026-08-11)
+    if (release.team.members.some((member) => member.userId === adjudicatorId)) {
+      return NextResponse.json(
+        { error: 'The adjudicator cannot be a member of the team they adjudicate' },
+        { status: 400 }
+      )
+    }
   }
 
   const updated = await prisma.teamBatchRelease.update({

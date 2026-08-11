@@ -22,6 +22,7 @@ model User {
 
   projects              ProjectEvaluator[]
   scores                Score[]
+  reconciliationsPerformed Score[] @relation("ScoreReconciledBy")
   batchAssignments      BatchAssignment[]
   teamMemberships       EvaluatorTeamMember[]
   adjudicatedReleases   TeamBatchRelease[] @relation("TeamReleaseAdjudicator")
@@ -373,10 +374,16 @@ model Score {
   startedAt       DateTime?
   scoredAt        DateTime  @default(now())
   durationSeconds Int?
+  // Who actually performed this reconciliation (clicked save) — only set on
+  // isReconciled rows. Distinct from `userId`, which is the release-owner slot
+  // the final is stored under, not necessarily the person acting. Nullable:
+  // rows written before 2026-08 predate attribution. (Luofan misclick guard)
+  reconciledById  String?
 
   feedbackItem FeedbackItem    @relation(fields: [feedbackItemId], references: [id], onDelete: Cascade)
   user         User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   dimension    RubricDimension @relation(fields: [dimensionId], references: [id], onDelete: Cascade)
+  reconciledBy User?           @relation("ScoreReconciledBy", fields: [reconciledById], references: [id], onDelete: SetNull)
 
   @@unique([feedbackItemId, userId, dimensionId, isReconciled])
   // The unique above is left-prefixed by feedbackItemId, so filters on userId

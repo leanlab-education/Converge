@@ -312,6 +312,7 @@ export async function POST(request: NextRequest) {
           reconciledFrom,
           notes: r.notes?.trim() || null,
           scoredAt: now,
+          reconciledById: session.user!.id,
         },
         create: {
           feedbackItemId: esc.feedbackItemId,
@@ -321,6 +322,7 @@ export async function POST(request: NextRequest) {
           isReconciled: true,
           reconciledFrom,
           notes: r.notes?.trim() || null,
+          reconciledById: session.user!.id,
         },
       }),
       prisma.escalation.update({
