@@ -2,7 +2,6 @@ import { auth } from '@/lib/auth'
 import { canAdminProject } from '@/lib/authorization'
 import { prisma } from '@/lib/db'
 import { Prisma } from '@/generated/prisma/client'
-import { evaluateConcessionRule } from '@/lib/reconcile-concession'
 import { evaluateReconciliationAccess } from '@/lib/reconciliation-access'
 import { maybeCompleteReleaseReconciliation } from '@/lib/reconciliation'
 import {
@@ -11,17 +10,6 @@ import {
   releaseNeedsReconciliation,
 } from '@/lib/team-batch-releases'
 import { NextRequest, NextResponse } from 'next/server'
-
-// Thrown inside the reconcile transaction to abort it with a specific HTTP
-// status (the concede-or-escalate 403), as opposed to a serialization conflict.
-class ConcessionRejection extends Error {
-  constructor(
-    public httpStatus: number,
-    message: string
-  ) {
-    super(message)
-  }
-}
 
 // POST /api/projects/[projectId]/batches/[batchId]/reconcile
 // Accepts reconciled scores for one team release.
@@ -201,13 +189,10 @@ export async function POST(
   const userId = session.user.id
 
   // Everything below runs in ONE serializable transaction: the adjudicated-keys
-  // snapshot, the concede-or-escalate pre-pass (Luofan 2026-07-29), and the
-  // writes. Serializable closes the check-then-write race — without it, a
-  // concurrent partner edit between the pre-pass read and the write could let a
-  // final flip back to the submitter's own original, the exact outcome the rule
-  // forbids. A conflicting concurrent save aborts (P2034) → 409, and a rule
-  // rejection (403) or any failure rolls back with nothing partially applied.
-  // (Fable review, 2026-08-11)
+  // snapshot, the pre-pass that gathers originals/existing finals, and the
+  // writes. Serializable keeps concurrent partner edits from interleaving — a
+  // conflicting concurrent save aborts (P2034) → 409, and any failure rolls
+  // back with nothing partially applied. (Fable review, 2026-08-11)
   let reconciledCount = 0
   try {
     reconciledCount = await prisma.$transaction(
@@ -225,11 +210,11 @@ export async function POST(
         )
 
         // Pre-pass: fetch originals + existing finals for every (item,
-        // dimension) and run the concession rule BEFORE writing anything. On a
-        // discrepancy, the person saving may not record their own original
-        // value — only their partner's (or a third value on wider scales), or
-        // escalate. The UI disables the option; enforce here too so a stale
-        // client can't bypass it.
+        // dimension) so the write loop can stamp reconciledFrom and detect
+        // whether the final value actually changed (for reconciledById
+        // attribution). Recording your own original on a discrepancy is allowed;
+        // the reconcile UI shows a "did you and your partner agree?" confirmation
+        // for that case, but it is not server-enforced. (2026-08-17)
         const writeContext = new Map<
           string,
           {
@@ -262,20 +247,6 @@ export async function POST(
               },
               select: { value: true },
             })
-            const concession = evaluateConcessionRule({
-              submittedValue: score.value,
-              submitterOriginal:
-                originals.find((o) => o.userId === userId)?.value ?? null,
-              partnerOriginal:
-                originals.find((o) => o.userId !== userId)?.value ?? null,
-              existingFinal: existingFinal?.value ?? null,
-            })
-            if (!concession.ok) {
-              throw new ConcessionRejection(
-                concession.httpStatus,
-                concession.error
-              )
-            }
             writeContext.set(key, {
               originals,
               existingFinalValue: existingFinal?.value ?? null,
@@ -334,12 +305,6 @@ export async function POST(
       { isolationLevel: 'Serializable' }
     )
   } catch (err) {
-    if (err instanceof ConcessionRejection) {
-      return NextResponse.json(
-        { error: err.message },
-        { status: err.httpStatus }
-      )
-    }
     if (
       err instanceof Prisma.PrismaClientKnownRequestError &&
       err.code === 'P2034'

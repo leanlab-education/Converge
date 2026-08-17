@@ -194,6 +194,12 @@ export function ReconcileClient({
     dimensionId: string
     value: number
   } | null>(null)
+  // A pending selection of the user's OWN original score on a first-recording
+  // discrepancy, awaiting the "did you and your partner agree?" confirmation.
+  const [pendingSelfOriginal, setPendingSelfOriginal] = useState<{
+    dimensionId: string
+    value: number
+  } | null>(null)
 
   // Fetch discrepancies on mount, and again after a save conflict so the
   // client re-syncs with what a partner (or adjudicator) changed concurrently.
@@ -332,9 +338,31 @@ export function ReconcileClient({
         setPendingEdit({ dimensionId, value })
         return
       }
+      // Concede-or-escalate confirmation (Luofan 2026-07-29; softened to a
+      // confirm on 2026-08-17): recording your OWN original as the final on the
+      // first pass means the pair agreed your score was right. It's allowed, but
+      // confirm it's deliberate — this is the speed bump that catches silent
+      // self-reconciles and 2-point-scale misclicks. Only the first recording is
+      // gated (once a final is persisted, editing is free); admins outside the
+      // pair have no "own original" so they skip it.
+      const disc = currentItem.discrepancies.find(
+        (d) => d.dimensionId === dimensionId
+      )
+      const myOriginal =
+        disc?.evaluatorA.userId === userId
+          ? disc.evaluatorA.value
+          : disc?.evaluatorB.userId === userId
+            ? disc.evaluatorB.value
+            : null
+      const alreadyPersisted =
+        persistedFinals[`${currentItem.feedbackItemId}::${dimensionId}`] != null
+      if (!alreadyPersisted && myOriginal != null && value === myOriginal) {
+        setPendingSelfOriginal({ dimensionId, value })
+        return
+      }
       applyFinalScore(dimensionId, value)
     },
-    [currentItem, isLocked, currentState, applyFinalScore]
+    [currentItem, isLocked, currentState, applyFinalScore, userId, persistedFinals]
   )
 
   const handleNotesChange = useCallback(
@@ -937,42 +965,14 @@ export function ReconcileClient({
                           <div className="mb-1.5 text-xs font-medium text-muted-foreground">
                             Final Score
                           </div>
-                          {(() => {
-                            // Concede-or-escalate (Luofan 2026-07-29): the
-                            // FIRST recording of a discrepancy may not be your
-                            // own original score — only your partner can record
-                            // it. Once a final exists (persisted != null),
-                            // editing is a deliberate correction and every
-                            // value is selectable; the server enforces the
-                            // same rule and records who changed what.
-                            const myOriginal =
-                              disc.evaluatorA.userId === userId
-                                ? disc.evaluatorA.value
-                                : disc.evaluatorB.userId === userId
-                                  ? disc.evaluatorB.value
-                                  : null
-                            const persistedKey = `${currentItem.feedbackItemId}::${disc.dimensionId}`
-                            const persisted = persistedFinals[persistedKey] ?? null
-                            const blockedValue =
-                              myOriginal != null && persisted == null
-                                ? myOriginal
-                                : null
-                            return (
-                              <>
                           <div className="flex flex-wrap gap-2">
                             {scaleOptions.map((val) => {
                               const label = scoreLabels[val]
                               const isSelected = finalValue === val
-                              const isBlocked = val === blockedValue
                               return (
-                              <button
+                                <button
                                   key={val}
-                                  disabled={isLocked || isBlocked}
-                                  title={
-                                    isBlocked
-                                      ? 'Your original score — your partner records it if you both agree it was right.'
-                                      : undefined
-                                  }
+                                  disabled={isLocked}
                                   onClick={() =>
                                     handleFinalScoreChange(disc.dimensionId, val)
                                   }
@@ -995,16 +995,6 @@ export function ReconcileClient({
                               )
                             })}
                           </div>
-                                {blockedValue != null && !isLocked && (
-                                  <p className="mt-1.5 text-xs text-muted-foreground">
-                                    You can&apos;t select your own original score.
-                                    If you both agree it was right, your partner
-                                    records it — or escalate below.
-                                  </p>
-                                )}
-                              </>
-                            )
-                          })()}
                         </div>
                         <Button
                           size="sm"
@@ -1194,6 +1184,52 @@ export function ReconcileClient({
               }}
             >
               Yes, change it
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Confirm before recording your OWN original as the final score. This is
+          the concede-or-escalate speed bump: allowed, but only after you and
+          your partner have agreed your score was right. */}
+      <Dialog
+        open={pendingSelfOriginal != null}
+        onOpenChange={(open) => {
+          if (!open) setPendingSelfOriginal(null)
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="size-4 text-warning" />
+              Record your own original score?
+            </DialogTitle>
+            <DialogDescription>
+              This is the score you originally gave. Only record it as the final
+              if you and your partner discussed the discrepancy and agreed your
+              score was right. If you haven&apos;t discussed it, cancel — your
+              partner can record it, or you can escalate to the adjudicator.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setPendingSelfOriginal(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                if (pendingSelfOriginal) {
+                  applyFinalScore(
+                    pendingSelfOriginal.dimensionId,
+                    pendingSelfOriginal.value
+                  )
+                }
+                setPendingSelfOriginal(null)
+              }}
+            >
+              Yes, we agreed
             </Button>
           </DialogFooter>
         </DialogContent>
