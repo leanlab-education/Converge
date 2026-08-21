@@ -2,11 +2,16 @@ import { auth } from '@/lib/auth'
 import { canAdminProject } from '@/lib/authorization'
 import { prisma } from '@/lib/db'
 import { maybeCompleteReleaseReconciliation } from '@/lib/reconciliation'
+import {
+  getExpectedReleaseUserIds,
+  releaseNeedsReconciliation,
+} from '@/lib/team-batch-releases'
 import { NextRequest, NextResponse } from 'next/server'
 
 // Admin-managed per-(release, criterion) re-open toggles. Presence of a row lets
-// both members of that pair go back and revise their individual scores for just
-// that one criterion on an already closed/reconciling batch. See
+// the scoped annotator(s) go back and revise their individual scores for just
+// that one criterion on an already closed/reconciling batch. The optional
+// `userId` narrows the re-open to a single annotator — see
 // ReleaseCriterionUnlock in schema.prisma.
 
 async function loadReleaseForBatch(
@@ -17,8 +22,24 @@ async function loadReleaseForBatch(
   const release = await prisma.teamBatchRelease.findUnique({
     where: { id: releaseId },
     include: {
-      batch: { select: { projectId: true, isLocked: true } },
-      team: { include: { dimensions: { select: { dimensionId: true } } } },
+      batch: {
+        select: {
+          id: true,
+          projectId: true,
+          isLocked: true,
+          type: true,
+          isDoubleScored: true,
+        },
+      },
+      team: {
+        include: {
+          dimensions: { select: { dimensionId: true } },
+          members: {
+            select: { userId: true },
+            orderBy: { user: { email: 'asc' } },
+          },
+        },
+      },
     },
   })
   if (
@@ -51,6 +72,7 @@ export async function GET(
       id: true,
       teamReleaseId: true,
       dimensionId: true,
+      userId: true,
       openedAt: true,
       dimension: { select: { label: true } },
     },
@@ -58,7 +80,9 @@ export async function GET(
   return NextResponse.json(unlocks)
 }
 
-// POST — open a criterion for re-scoring. Body: { releaseId, dimensionId }.
+// POST — open a criterion for re-scoring.
+// Body: { releaseId, dimensionId, userId? } — userId narrows the re-open to one
+// annotator; omit (or null) to open it for everyone assigned to the release.
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ projectId: string; batchId: string }> }
@@ -72,9 +96,10 @@ export async function POST(
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
-  const { releaseId, dimensionId } = (await request.json()) as {
+  const { releaseId, dimensionId, userId } = (await request.json()) as {
     releaseId?: string
     dimensionId?: string
+    userId?: string | null
   }
   if (!releaseId || !dimensionId) {
     return NextResponse.json(
@@ -102,17 +127,36 @@ export async function POST(
     )
   }
 
+  // A scoped re-open must name someone who actually scored this release —
+  // otherwise it would open a criterion for an annotator with no items.
+  const scopedUserId = userId || null
+  if (scopedUserId && !getExpectedReleaseUserIds(release).includes(scopedUserId)) {
+    return NextResponse.json(
+      { error: 'That annotator is not assigned to score this batch.' },
+      { status: 400 }
+    )
+  }
+
   const unlock = await prisma.releaseCriterionUnlock.upsert({
     where: {
       teamReleaseId_dimensionId: { teamReleaseId: releaseId, dimensionId },
     },
-    update: {},
-    create: { teamReleaseId: releaseId, dimensionId, openedById: session.user.id },
+    // Re-targeting an already-open criterion (e.g. "both" → just Luofan) updates
+    // the scope in place rather than stacking rows.
+    update: { userId: scopedUserId, openedById: session.user.id },
+    create: {
+      teamReleaseId: releaseId,
+      dimensionId,
+      userId: scopedUserId,
+      openedById: session.user.id,
+    },
   })
 
   // Move the release into RECONCILING so the reconcile hub is reachable while the
   // pair revises. (COMPLETE releases are otherwise settled.) Idempotent.
-  if (release.status === 'COMPLETE') {
+  // Independent (non-double-scored) releases never reconcile — there is no hub to
+  // reach and no discrepancy to re-settle — so they stay COMPLETE while open.
+  if (release.status === 'COMPLETE' && releaseNeedsReconciliation(release)) {
     await prisma.teamBatchRelease.update({
       where: { id: releaseId },
       data: { status: 'RECONCILING' },

@@ -30,6 +30,8 @@ interface TeamReleaseRow {
   members: { id: string; email: string; name: string | null }[]
   dimensions: { id: string; label: string }[]
   unlockedDimensionIds?: string[]
+  // Per-unlock scope: null userId = open for everyone assigned to the release.
+  criterionUnlocks?: { dimensionId: string; userId: string | null }[]
   progressPct: number
   irr?: {
     isApplicable: boolean
@@ -300,11 +302,17 @@ export function BatchCreator({
     batchId: string,
     releaseId: string,
     dimensionId: string,
-    open: boolean
+    open: boolean,
+    // Scope of the re-open: undefined/null = everyone assigned to the release
+    // (the double-scored pair case); a userId = just that annotator (independent
+    // batches). Ignored when closing.
+    userId?: string | null,
+    confirmMessage?: string
   ) {
     if (open) {
       const ok = window.confirm(
-        'Re-open this criterion for the pair? Both annotators will be able to go back and revise their individual scores for this one criterion. Reconciliation re-derives from their revised scores.'
+        confirmMessage ??
+          'Re-open this criterion for the pair? Both annotators will be able to go back and revise their individual scores for this one criterion. Reconciliation re-derives from their revised scores.'
       )
       if (!ok) return
     }
@@ -314,7 +322,7 @@ export function BatchCreator({
         {
           method: open ? 'POST' : 'DELETE',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ releaseId, dimensionId }),
+          body: JSON.stringify({ releaseId, dimensionId, userId: userId ?? null }),
         }
       )
       if (response.ok) {
@@ -881,6 +889,85 @@ export function BatchCreator({
                                     </option>
                                   ))}
                                 </select>
+                              </div>
+                            )}
+                            {/* Re-open a criterion on an independent (non-double-scored)
+                                batch. Each item holds one score here, so the re-open is
+                                scoped per annotator: the revised value simply replaces
+                                their old score in every export. (Amber/Luofan 2026-07-31) */}
+                            {batch.type === 'REGULAR' && !batch.isDoubleScored && (
+                              <div className="mt-2 border-t border-border/40 pt-2">
+                                <div className="mb-1 flex items-center gap-1 text-[10px] text-muted-foreground">
+                                  <LockOpen className="size-2.5" />
+                                  Re-open criterion for re-scoring
+                                </div>
+                                <div className="space-y-1">
+                                  {release.dimensions.map((dim) => {
+                                    const unlock = release.criterionUnlocks?.find(
+                                      (u) => u.dimensionId === dim.id
+                                    )
+                                    // Single-scorer releases have one assigned annotator;
+                                    // slot-split releases split items between both, so the
+                                    // admin picks who may revise (or everyone assigned).
+                                    const assigned = release.scorerUserId
+                                      ? release.members.filter((m) => m.id === release.scorerUserId)
+                                      : release.members
+                                    return (
+                                      <div key={dim.id} className="flex items-center gap-1.5 text-[10px]">
+                                        <span
+                                          className={cn(
+                                            'min-w-0 flex-1 truncate',
+                                            unlock ? 'font-medium text-warning' : 'text-muted-foreground'
+                                          )}
+                                          title={dim.label}
+                                        >
+                                          {unlock ? `● ${dim.label}` : dim.label}
+                                        </span>
+                                        <select
+                                          className="h-6 max-w-[130px] rounded-md border border-border/70 bg-background px-1.5 text-[10px] transition-all duration-200 hover:border-border disabled:cursor-not-allowed disabled:opacity-50"
+                                          disabled={batch.isLocked}
+                                          value={!unlock ? '' : (unlock.userId ?? 'ALL')}
+                                          onChange={(event) => {
+                                            const value = event.target.value
+                                            if (value === '') {
+                                              if (unlock) {
+                                                handleToggleCriterionUnlock(batch.id, release.id, dim.id, false)
+                                              }
+                                              return
+                                            }
+                                            const scopedUserId = value === 'ALL' ? null : value
+                                            const who =
+                                              scopedUserId === null
+                                                ? 'everyone assigned to this batch'
+                                                : displayAnnotatorName(
+                                                    scopedUserId,
+                                                    release.members.find((m) => m.id === scopedUserId)?.name ?? null,
+                                                    usePseudonyms
+                                                  )
+                                            handleToggleCriterionUnlock(
+                                              batch.id,
+                                              release.id,
+                                              dim.id,
+                                              true,
+                                              scopedUserId,
+                                              `Re-open "${dim.label}" for ${who}? They can go back and change their scores for this one criterion; the new score replaces the old one in every export.`
+                                            )
+                                          }}
+                                        >
+                                          <option value="">Closed</option>
+                                          {assigned.length > 1 && (
+                                            <option value="ALL">Open: everyone</option>
+                                          )}
+                                          {assigned.map((m) => (
+                                            <option key={m.id} value={m.id}>
+                                              Open: {displayAnnotatorName(m.id, m.name, usePseudonyms)}
+                                            </option>
+                                          ))}
+                                        </select>
+                                      </div>
+                                    )
+                                  })}
+                                </div>
                               </div>
                             )}
                           </div>

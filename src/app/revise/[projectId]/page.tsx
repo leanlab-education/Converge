@@ -1,10 +1,12 @@
 import { auth } from '@/lib/auth'
+import { unlockVisibleToUserWhere } from '@/lib/criterion-unlocks'
 import { prisma } from '@/lib/db'
 import { redirect } from 'next/navigation'
 import { EvaluateClient } from '../../evaluate/[projectId]/evaluate-client'
 
 // Annotator "re-score one re-opened criterion" flow. Reachable only when an admin
-// has opened a ReleaseCriterionUnlock for the annotator's pair on this batch.
+// has opened a ReleaseCriterionUnlock that applies to this annotator on this
+// batch — pair-wide, or scoped to them by name (independent batches).
 // This reuses the normal scoring screen (EvaluateClient) in "revise mode": it
 // looks and behaves exactly like the original scoring session — numbered nav,
 // notes, auto-save, Continue/auto-advance — except the rubric is filtered to the
@@ -24,16 +26,19 @@ export default async function RevisePage({
   if (!batchId) redirect('/')
 
   // Find the caller's release on this batch that has at least one open criterion
-  // unlock. The membership + unlock together are the authorization.
+  // unlock applying to them. The membership + unlock together are the
+  // authorization; unlocks scoped to a different annotator don't count.
+  const unlockWhere = unlockVisibleToUserWhere(session.user.id)
   const release = await prisma.teamBatchRelease.findFirst({
     where: {
       batchId,
       team: { members: { some: { userId: session.user.id } } },
-      criterionUnlocks: { some: {} },
+      criterionUnlocks: { some: unlockWhere },
     },
     include: {
       batch: { select: { projectId: true, name: true, type: true } },
       criterionUnlocks: {
+        where: unlockWhere,
         select: { dimensionId: true },
         orderBy: { openedAt: 'asc' },
       },

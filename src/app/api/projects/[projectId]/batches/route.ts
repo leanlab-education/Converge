@@ -89,7 +89,7 @@ export async function GET(
               },
             },
           },
-          criterionUnlocks: { select: { dimensionId: true } },
+          criterionUnlocks: { select: { dimensionId: true, userId: true } },
         },
         orderBy: { team: { name: 'asc' } },
       },
@@ -271,6 +271,11 @@ export async function GET(
             expectedScoreCount,
             irr: teamIrrByReleaseId.get(release.id) ?? null,
             unlockedDimensionIds: release.criterionUnlocks.map((u) => u.dimensionId),
+            // Per-unlock scope: null userId = open for everyone assigned.
+            criterionUnlocks: release.criterionUnlocks.map((u) => ({
+              dimensionId: u.dimensionId,
+              userId: u.userId,
+            })),
           }
         })
       )

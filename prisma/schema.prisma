@@ -30,6 +30,7 @@ model User {
   escalationsCreated    Escalation[]   @relation("EscalationEscalatedBy")
   escalationsResolved   Escalation[]   @relation("EscalationResolvedBy")
   criterionUnlocksOpened ReleaseCriterionUnlock[] @relation("CriterionUnlockOpenedBy")
+  criterionUnlocksScoped ReleaseCriterionUnlock[] @relation("CriterionUnlockAnnotator")
   activitySessions      ActivitySession[]
   activityDays          ActivityDaily[]
 }
@@ -294,24 +295,37 @@ model TeamBatchRelease {
   @@unique([batchId, teamId])
 }
 
-// Admin "re-open" of a single criterion for one pair on one (already closed or
-// reconciling) batch — lets both team members go back and revise their own raw
-// scores for just that criterion, without unfreezing the rest of the batch.
+// Admin "re-open" of a single criterion on one (already closed or reconciling)
+// batch — lets the annotator(s) go back and revise their own raw scores for just
+// that criterion, without unfreezing the rest of the batch.
 //
 // Presence of a row = that (teamRelease, dimension) is open for revision. The
 // scoped write path (revise route) checks this instead of the normal
 // SCORING-status gate. Reversible: deleting the row re-closes the criterion.
 // Scoped to a dimension so e.g. Task Aligned Revision can be reopened while
 // Anchored in Student Response stays untouched. (Amber/V12, 2026-07)
+//
+// `userId` narrows the re-open to ONE annotator:
+//   - null  → every member assigned to the release. This is the double-scored
+//             pair case: both members revise and reconciliation re-derives.
+//   - set   → only that annotator may revise, and only over the items they were
+//             actually assigned. This is the independent (non-double-scored)
+//             case, where each member owns half the batch by slotIndex, so
+//             re-opening for the pair would pull in someone with nothing to fix.
+//             (Amber/Luofan, 2026-07-31)
+// One row per (release, dimension): the scope is a property of the re-open, not
+// a second row, so "open for Luofan" and "open for both" can't disagree.
 model ReleaseCriterionUnlock {
   id            String   @id @default(cuid())
   teamReleaseId String
   dimensionId   String
+  userId        String?  // null = all assigned members; set = only this annotator
   openedById    String   // admin who opened it
   openedAt      DateTime @default(now())
 
   teamRelease TeamBatchRelease @relation(fields: [teamReleaseId], references: [id], onDelete: Cascade)
   dimension   RubricDimension  @relation(fields: [dimensionId], references: [id], onDelete: Cascade)
+  user        User?            @relation("CriterionUnlockAnnotator", fields: [userId], references: [id], onDelete: Cascade)
   openedBy    User             @relation("CriterionUnlockOpenedBy", fields: [openedById], references: [id], onDelete: Cascade)
 
   @@unique([teamReleaseId, dimensionId])

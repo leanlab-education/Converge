@@ -1,12 +1,15 @@
 import { auth } from '@/lib/auth'
+import { unlockVisibleToUserWhere } from '@/lib/criterion-unlocks'
 import { prisma } from '@/lib/db'
 import { reReconcileReleaseItem } from '@/lib/reconciliation'
+import { getReleaseItemScope } from '@/lib/team-batch-releases'
 import { NextRequest, NextResponse } from 'next/server'
 
 // POST /api/projects/[projectId]/batches/[batchId]/revise
 // An annotator revises their OWN individual (raw) score for a single criterion
-// that an admin has re-opened for their pair on this batch (ReleaseCriterionUnlock).
-// Only the unlocked criterion can be written; the change re-derives reconciliation
+// that an admin has re-opened for them on this batch (ReleaseCriterionUnlock —
+// either pair-wide or scoped to this one annotator). Only the unlocked criterion
+// can be written; on a double-scored batch the change re-derives reconciliation
 // for that one dimension. Other criteria are never touched.
 export async function POST(
   request: NextRequest,
@@ -47,17 +50,30 @@ export async function POST(
   }
 
   // Find the release for THIS user's team on this batch that has an active unlock
-  // for this dimension. This single query is the authorization: the user must be
-  // a member of a team whose release for this batch has re-opened this criterion.
+  // for this dimension which applies to them. This single query is the
+  // authorization: the user must be a member of a team whose release for this
+  // batch has re-opened this criterion, either pair-wide or for them by name.
   const release = await prisma.teamBatchRelease.findFirst({
     where: {
       batchId,
       team: { members: { some: { userId: session.user.id } } },
-      criterionUnlocks: { some: { dimensionId } },
+      criterionUnlocks: {
+        some: { dimensionId, ...unlockVisibleToUserWhere(session.user.id) },
+      },
     },
     select: {
       id: true,
-      team: { select: { dimensions: { select: { dimensionId: true } } } },
+      scorerUserId: true,
+      batch: { select: { id: true, type: true, isDoubleScored: true } },
+      team: {
+        select: {
+          dimensions: { select: { dimensionId: true } },
+          members: {
+            select: { userId: true },
+            orderBy: { user: { email: 'asc' } },
+          },
+        },
+      },
     },
   })
   if (!release) {
@@ -80,7 +96,7 @@ export async function POST(
   const [item, dimension] = await Promise.all([
     prisma.feedbackItem.findUnique({
       where: { id: feedbackItemId },
-      select: { batchId: true },
+      select: { batchId: true, slotIndex: true },
     }),
     prisma.rubricDimension.findUnique({
       where: { id: dimensionId },
@@ -89,6 +105,22 @@ export async function POST(
   ])
   if (!item || item.batchId !== batchId) {
     return NextResponse.json({ error: 'Item is not in this batch' }, { status: 400 })
+  }
+
+  // The annotator may only revise items they were actually assigned. This matters
+  // on an independent (non-double-scored) batch, where the pair splits the items
+  // by slotIndex and each item×criterion holds exactly ONE score: writing outside
+  // your slot would add a second raw score and break the "final = the lone raw
+  // score" rule every export depends on.
+  const itemScope = getReleaseItemScope(release, session.user.id)
+  if (
+    itemScope.mode === 'none' ||
+    (itemScope.mode === 'slot' && item.slotIndex !== itemScope.slotIndex)
+  ) {
+    return NextResponse.json(
+      { error: 'That item is not assigned to you on this batch.' },
+      { status: 403 }
+    )
   }
   if (!dimension || dimension.projectId !== projectId) {
     return NextResponse.json({ error: 'Invalid criterion' }, { status: 400 })
@@ -144,8 +176,11 @@ export async function POST(
 
   // Only re-settle reconciliation when the score actually changed — an unchanged
   // re-save (e.g. from navigation auto-save) leaves existing reconciliations
-  // untouched.
-  if (valueChanged) {
+  // untouched. Independent (non-double-scored regular) releases never reconcile:
+  // the revised raw score IS the final score, so there is nothing to re-derive.
+  const releaseReconciles =
+    release.batch.type === 'TRAINING' || release.batch.isDoubleScored
+  if (valueChanged && releaseReconciles) {
     await reReconcileReleaseItem(release.id, feedbackItemId, dimensionId)
   }
 

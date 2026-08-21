@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation'
 import { EvaluatorProjectPage } from './evaluator-project-page'
 import { countForAssignment, loadSlotMaps } from '@/lib/evaluator-stats'
 import { computeReleaseDiscrepancyStats } from '@/lib/reconciliation'
+import { unlockVisibleToUserWhere } from '@/lib/criterion-unlocks'
 import { displayAnnotatorName } from '@/lib/generate-name'
 
 export default async function ProjectPage({
@@ -205,11 +206,13 @@ export default async function ProjectPage({
   }
   const adjudicateTasks = Array.from(adjudicateMap.values())
 
-  // --- Revise: criteria an admin re-opened for this annotator's pair ---
+  // --- Revise: criteria an admin re-opened for this annotator ---
   // Each ReleaseCriterionUnlock on a batch this user's team scored lets them go
-  // back and edit their individual scores for just that one criterion.
+  // back and edit their individual scores for just that one criterion. Unlocks
+  // scoped to a different annotator (userId set) are not their task.
   const reviseUnlocks = await prisma.releaseCriterionUnlock.findMany({
     where: {
+      ...unlockVisibleToUserWhere(userId),
       teamRelease: {
         batch: { projectId, isHidden: false },
         team: { members: { some: { userId } } },
