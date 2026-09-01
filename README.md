@@ -1,4 +1,4 @@
-# Writing Evaluator
+# Converge
 
 A blinded, rubric-based scoring tool for evaluating written feedback quality — built by [Leanlab Education](https://leanlabeducation.org) for research comparing human- and AI-generated feedback (the Quill/CZI rapid-cycle evaluation).
 

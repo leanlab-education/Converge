@@ -7,7 +7,7 @@
 // actually query the DB set a real DATABASE_URL (via doppler) and run in a
 // separate suite.
 process.env.DATABASE_URL ||=
-  'postgresql://test:test@localhost:5432/writing_evaluator_test'
+  'postgresql://test:test@localhost:5432/converge_test'
 process.env.AUTH_SECRET ||= 'test-secret-not-used-for-real-auth'
 process.env.STUDYFLOW_LINK_SECRET ||= 'test-studyflow-secret'
 process.env.APP_URL ||= 'http://localhost:3333'

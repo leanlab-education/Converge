@@ -1,10 +1,12 @@
-# AGENTS.md — Writing Evaluator
+# AGENTS.md — Converge
 
 ## What This Is
 
 A standalone blinded, rubric-based scoring tool for evaluating written feedback quality (human vs AI-generated). Built for Leanlab's Quill/CZI project. External collaborators (Amber Wang at Quill, CZI) will use this tool.
 
-**Not part of StudyFlow.** This is a separate repo with its own auth, database, and deployment. However, it has a **magic link integration** with StudyFlow — evaluators can launch Writing Evaluator from a StudyFlow activity and be auto-signed in via a signed JWT.
+**Not part of StudyFlow.** This is a separate repo with its own auth, database, and deployment. However, it has a **magic link integration** with StudyFlow — evaluators can launch Converge from a StudyFlow activity and be auto-signed in via a signed JWT.
+
+**Renamed from "Writing Evaluator" to "Converge" (2026-09-01)** — cosmetic/docs done; UI text, emails, production domain, and the JWT `audience` claim are deliberately deferred to October so active users/links aren't disrupted mid-study. See the tracking note in [CLAUDE.md](CLAUDE.md).
 
 ## Git Commits
 
@@ -224,7 +226,7 @@ Full reference: `docs/DESIGN_SYSTEM.md`
 ```
 DATABASE_URL                # Neon connection string
 AUTH_SECRET                 # Auth.js session secret
-STUDYFLOW_LINK_SECRET       # Shared secret for StudyFlow ↔ Writing Evaluator JWT signing (same value in both projects)
+STUDYFLOW_LINK_SECRET       # Shared secret for StudyFlow ↔ Converge JWT signing (same value in both projects)
 STUDYFLOW_API_URL           # StudyFlow API base URL (for fetching participants)
 RESEND_API_KEY              # Resend email service (invite + password reset emails)
 APP_URL                     # This app's public URL (used in email links)
@@ -234,8 +236,8 @@ APP_URL                     # This app's public URL (used in email links)
 
 **Study-specific** — only the Quill - Evaluators study uses this integration.
 
-- **Magic link login**: StudyFlow signs a JWT with `STUDYFLOW_LINK_SECRET` containing `email`, `name`, `project_id`. Writing Evaluator verifies the JWT at `/login` (requires `exp`, enforces 10-min `maxTokenAge`, validates `issuer: 'studyflow'` + `audience: 'writing-evaluator'`) and auto-creates evaluator accounts. **TODO**: StudyFlow side needs to add `.setIssuer('studyflow').setAudience('writing-evaluator')` to `generateWritingEvaluatorLink()` in `studyflow/src/lib/writing-evaluator.ts` — until then, magic link login will fail.
-- **Participant import**: Writing Evaluator can fetch active participants from StudyFlow via signed JWT to `STUDYFLOW_API_URL/api/studies/{studyId}/participants`. Admin uses "Import from StudyFlow" on the Evaluators tab.
+- **Magic link login**: StudyFlow signs a JWT with `STUDYFLOW_LINK_SECRET` containing `email`, `name`, `project_id`. Converge verifies the JWT at `/login` (requires `exp`, enforces 10-min `maxTokenAge`, validates `issuer: 'studyflow'` + `audience: 'writing-evaluator'`) and auto-creates evaluator accounts. **TODO**: StudyFlow side needs to add `.setIssuer('studyflow').setAudience('writing-evaluator')` to `generateWritingEvaluatorLink()` in `studyflow/src/lib/writing-evaluator.ts` — until then, magic link login will fail.
+- **Participant import**: Converge can fetch active participants from StudyFlow via signed JWT to `STUDYFLOW_API_URL/api/studies/{studyId}/participants`. Admin uses "Import from StudyFlow" on the Evaluators tab.
 - **Study linking**: Each project has an optional `studyflowStudyId` field (set in Overview tab) that connects it to a StudyFlow study.
 - **Shared secret**: `STUDYFLOW_LINK_SECRET` must be the same value in both projects.
 

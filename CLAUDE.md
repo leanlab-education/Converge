@@ -1,10 +1,19 @@
-# CLAUDE.md — Writing Evaluator
+# CLAUDE.md — Converge
 
 ## What This Is
 
 A standalone blinded, rubric-based scoring tool for evaluating written feedback quality (human vs AI-generated). Built for Leanlab's Quill/CZI project. External collaborators (Amber Wang at Quill, CZI) will use this tool.
 
-**Not part of StudyFlow.** This is a separate repo with its own auth, database, and deployment. However, it has a **magic link integration** with StudyFlow — evaluators can launch Writing Evaluator from a StudyFlow activity and be auto-signed in via a signed JWT.
+**Not part of StudyFlow.** This is a separate repo with its own auth, database, and deployment. However, it has a **magic link integration** with StudyFlow — evaluators can launch Converge from a StudyFlow activity and be auto-signed in via a signed JWT.
+
+### Renamed from "Writing Evaluator" to "Converge" (2026-09-01, in progress)
+
+The GitHub repo is renamed (`leanlab-education/Converge`). Everything cosmetic (docs, package name) is renamed. **Deliberately deferred to October**, once current annotators/studies wrap, because changing them mid-study would confuse active users or break live links:
+- **UI display text** — sidebar/header ([app-shell.tsx](src/components/app-shell.tsx), [app-sidebar.tsx](src/components/app-sidebar.tsx)), page `<title>` ([layout.tsx](src/app/layout.tsx)), login card ([login/page.tsx](src/app/login/page.tsx)), invite copy ([invite/[token]/page.tsx](src/app/invite/[token]/page.tsx))
+- **Emails** — `FROM_EMAIL`, subject lines, body copy ([email.ts](src/lib/email.ts)) — an annotator invited under the old name shouldn't get a reset email from a name they don't recognize
+- **Production domain** — `writing-evaluator.vercel.app` (Vercel project rename would change this; StudyFlow magic links point at `APP_URL`, so needs a coordinated cutover with redirects)
+- **JWT audience claim** — `audience: 'writing-evaluator'` in [auth.ts](src/lib/auth.ts) — cross-repo contract with StudyFlow's `generateWritingEvaluatorLink()`; bundle with the domain cutover
+- **Doppler/Neon/Vercel project names** — still literally `writing-evaluator`; low priority, no user impact, rename whenever convenient
 
 ## Git Commits
 
@@ -313,7 +322,7 @@ Full reference: `docs/DESIGN_SYSTEM.md`
 ```
 DATABASE_URL                # Neon connection string
 AUTH_SECRET                 # Auth.js session secret
-STUDYFLOW_LINK_SECRET       # Shared secret for StudyFlow ↔ Writing Evaluator JWT signing (same value in both projects)
+STUDYFLOW_LINK_SECRET       # Shared secret for StudyFlow ↔ Converge JWT signing (same value in both projects)
 STUDYFLOW_API_URL           # StudyFlow API base URL (for fetching participants)
 RESEND_API_KEY              # Resend email service (invite + password reset emails)
 APP_URL                     # This app's public URL (used in email links)
@@ -323,8 +332,8 @@ APP_URL                     # This app's public URL (used in email links)
 
 **Study-specific** — only the Quill - Evaluators study uses this integration.
 
-- **Magic link login**: StudyFlow signs a JWT with `STUDYFLOW_LINK_SECRET` containing `email`, `name`, `project_id`. Writing Evaluator verifies the JWT at `/login` (requires `exp`, enforces 10-min `maxTokenAge`, validates `issuer: 'studyflow'` + `audience: 'writing-evaluator'`) and auto-creates evaluator accounts. StudyFlow already sets `.setIssuer('studyflow').setAudience('writing-evaluator')` in `generateWritingEvaluatorLink()`.
-- **Participant import**: Writing Evaluator can fetch active participants from StudyFlow via signed JWT to `STUDYFLOW_API_URL/api/studies/{studyId}/participants`. Admin uses "Import from StudyFlow" on the Evaluators tab.
+- **Magic link login**: StudyFlow signs a JWT with `STUDYFLOW_LINK_SECRET` containing `email`, `name`, `project_id`. Converge verifies the JWT at `/login` (requires `exp`, enforces 10-min `maxTokenAge`, validates `issuer: 'studyflow'` + `audience: 'writing-evaluator'`) and auto-creates evaluator accounts. StudyFlow already sets `.setIssuer('studyflow').setAudience('writing-evaluator')` in `generateWritingEvaluatorLink()`.
+- **Participant import**: Converge can fetch active participants from StudyFlow via signed JWT to `STUDYFLOW_API_URL/api/studies/{studyId}/participants`. Admin uses "Import from StudyFlow" on the Evaluators tab.
 - **Study linking**: Each project has an optional `studyflowStudyId` field (set in Overview tab) that connects it to a StudyFlow study.
 - **Shared secret**: `STUDYFLOW_LINK_SECRET` must be the same value in both projects.
 
@@ -344,6 +353,7 @@ APP_URL                     # This app's public URL (used in email links)
 
 ## Remaining TODO
 
+- [ ] **Finish "Converge" rename (~October, once current studies wrap)**: UI display text, email templates, production domain (`writing-evaluator.vercel.app` → new domain + redirect), JWT `audience` claim (coordinate with StudyFlow), Doppler/Neon/Vercel project names. See "Renamed from Writing Evaluator" note above.
 - [ ] Connect to Replit for non-engineer access
 - [x] **StudyFlow JWT iss/aud**: Already implemented in StudyFlow's `generateWritingEvaluatorLink()`
 - [ ] **MFA**: Build opt-in TOTP (deferred — ASVS L2 requirement, planned as opt-in per user)
