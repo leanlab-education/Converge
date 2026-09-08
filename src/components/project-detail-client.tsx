@@ -979,6 +979,8 @@ export function ProjectDetailClient({
                 id: b.id,
                 name: b.name,
                 status: b.status,
+                type: b.type,
+                isDoubleScored: b.isDoubleScored,
                 activityId: b.activityId,
                 conjunctionId: b.conjunctionId,
               }))}

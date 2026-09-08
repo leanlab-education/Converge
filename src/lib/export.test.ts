@@ -1,9 +1,14 @@
 import { describe, it, expect } from 'vitest'
 import {
+  DISCREPANCY_COLUMNS,
+  buildDiscrepancyFilename,
+  buildDiscrepancyRows,
   buildExportFilename,
   buildItemGrainRows,
   buildScorerGrainRows,
   csvEscape,
+  discrepancyCells,
+  discrepancyHeader,
   formatScoringRole,
   hasFullScoreSet,
   isItemGrain,
@@ -14,6 +19,7 @@ import {
   scorerGrainHeader,
   toCsv,
   usesFinalScores,
+  type DiscrepancyRawScore,
   type ItemGrainItem,
   type ScorerGrainInput,
 } from '@/lib/export'
@@ -490,5 +496,310 @@ describe('buildExportFilename', () => {
     ).toBe(
       'scores-reconciled-by-feedback-activity-9-conj-Because-complete-items-finalized-batches-2026-07-28.csv'
     )
+  })
+})
+
+// ---------------------------------------------------------------------------
+
+describe('discrepancy report', () => {
+  const TEAMS = new Map([
+    ['u-abi', { id: 't1', name: 'Team 1' }],
+    ['u-luofan', { id: 't1', name: 'Team 1' }],
+    ['u-jon', { id: 't2', name: 'Team 2' }],
+    ['u-mei', { id: 't2', name: 'Team 2' }],
+  ])
+  const BATCH = {
+    batchName: 'Batch 45',
+    batchType: 'REGULAR',
+    batchStatus: 'RECONCILING',
+    batchSortOrder: 45,
+  }
+
+  function raw(
+    overrides: Partial<DiscrepancyRawScore> & {
+      userId: string
+      value: number
+    }
+  ): DiscrepancyRawScore {
+    return {
+      feedbackItemId: 'i1',
+      userEmail: `${overrides.userId.replace('u-', '')}@test.com`,
+      dimensionKey: 'criterion_1',
+      dimensionLabel: 'Manageable',
+      dimensionSortOrder: 1,
+      notes: null,
+      item: item(),
+      batch: BATCH,
+      ...overrides,
+    }
+  }
+
+  it('reports only the criteria where the pair disagreed', () => {
+    const rows = buildDiscrepancyRows(
+      [
+        raw({ userId: 'u-abi', value: 1 }),
+        raw({ userId: 'u-luofan', value: 2 }),
+        raw({ userId: 'u-abi', value: 3, dimensionKey: 'criterion_2' }),
+        raw({ userId: 'u-luofan', value: 3, dimensionKey: 'criterion_2' }),
+      ],
+      [],
+      [],
+      { teamByUserId: TEAMS }
+    )
+    expect(rows).toHaveLength(1)
+    expect(rows[0].dimensionKey).toBe('criterion_1')
+    expect(rows[0].difference).toBe(1)
+    expect(rows[0].resolution).toBe('Unresolved')
+    expect(rows[0].finalValue).toBeNull()
+  })
+
+  it('puts the same annotator in the same column on every row (alphabetical)', () => {
+    const rows = buildDiscrepancyRows(
+      [
+        raw({ userId: 'u-luofan', value: 2 }),
+        raw({ userId: 'u-abi', value: 1 }),
+        raw({ userId: 'u-abi', value: 2, dimensionKey: 'criterion_2' }),
+        raw({ userId: 'u-luofan', value: 1, dimensionKey: 'criterion_2' }),
+      ],
+      [],
+      [],
+      { teamByUserId: TEAMS }
+    )
+    expect(rows.map((r) => r.evaluatorA.email)).toEqual([
+      'abi@test.com',
+      'abi@test.com',
+    ])
+    expect(rows.map((r) => r.evaluatorB.email)).toEqual([
+      'luofan@test.com',
+      'luofan@test.com',
+    ])
+  })
+
+  it('skips cells that are not a completed pair (partner not yet scored)', () => {
+    const rows = buildDiscrepancyRows(
+      [raw({ userId: 'u-abi', value: 1 })],
+      [],
+      [],
+      { teamByUserId: TEAMS }
+    )
+    expect(rows).toEqual([])
+  })
+
+  it('attaches the final value, who recorded it, and the rationale', () => {
+    const rows = buildDiscrepancyRows(
+      [
+        raw({ userId: 'u-abi', value: 1, notes: 'Too vague' }),
+        raw({ userId: 'u-luofan', value: 3 }),
+      ],
+      [
+        {
+          feedbackItemId: 'i1',
+          ownerUserId: 'u-abi', // release-owner slot, not the actor
+          dimensionKey: 'criterion_1',
+          value: 3,
+          notes: 'Discussed; feedback does name the next step.',
+          recordedByEmail: 'luofan@test.com',
+        },
+      ],
+      [],
+      { teamByUserId: TEAMS }
+    )
+    expect(rows[0].finalValue).toBe(3)
+    expect(rows[0].resolution).toBe('Reconciled')
+    expect(rows[0].finalRecordedBy).toBe('luofan@test.com')
+    expect(rows[0].reconciliationNotes).toBe(
+      'Discussed; feedback does name the next step.'
+    )
+    expect(rows[0].evaluatorA.notes).toBe('Too vague')
+    expect(rows[0].evaluatorB.notes).toBe('')
+  })
+
+  it('carries per-item notes and rationale onto every discrepancy row for that item', () => {
+    // Notes are entered once per item; the DB repeats them on each dimension
+    // row, but a note may only be present on the row for one criterion.
+    const rows = buildDiscrepancyRows(
+      [
+        raw({ userId: 'u-abi', value: 1, notes: 'Hard call' }),
+        raw({ userId: 'u-luofan', value: 2 }),
+        raw({ userId: 'u-abi', value: 1, dimensionKey: 'criterion_2', dimensionSortOrder: 2 }),
+        raw({ userId: 'u-luofan', value: 2, dimensionKey: 'criterion_2', dimensionSortOrder: 2 }),
+      ],
+      [
+        {
+          feedbackItemId: 'i1',
+          ownerUserId: 'u-abi',
+          dimensionKey: 'criterion_1',
+          value: 2,
+          notes: 'Agreed on B',
+          recordedByEmail: null,
+        },
+      ],
+      [],
+      { teamByUserId: TEAMS }
+    )
+    expect(rows).toHaveLength(2)
+    expect(rows.map((r) => r.evaluatorA.notes)).toEqual(['Hard call', 'Hard call'])
+    expect(rows.map((r) => r.reconciliationNotes)).toEqual(['Agreed on B', 'Agreed on B'])
+    // Only criterion_1 has a final; criterion_2 is still open.
+    expect(rows.map((r) => r.resolution)).toEqual(['Reconciled', 'Unresolved'])
+  })
+
+  it('distinguishes escalated-pending from adjudicated', () => {
+    const rows = buildDiscrepancyRows(
+      [
+        raw({ userId: 'u-abi', value: 1 }),
+        raw({ userId: 'u-luofan', value: 2 }),
+        raw({ userId: 'u-abi', value: 1, dimensionKey: 'criterion_2', dimensionSortOrder: 2 }),
+        raw({ userId: 'u-luofan', value: 2, dimensionKey: 'criterion_2', dimensionSortOrder: 2 }),
+      ],
+      [
+        {
+          feedbackItemId: 'i1',
+          ownerUserId: 'u-abi',
+          dimensionKey: 'criterion_2',
+          value: 1,
+          notes: null,
+          recordedByEmail: 'amber@test.com',
+        },
+      ],
+      [
+        { feedbackItemId: 'i1', teamId: 't1', dimensionKey: 'criterion_1', resolved: false },
+        { feedbackItemId: 'i1', teamId: 't1', dimensionKey: 'criterion_2', resolved: true },
+      ],
+      { teamByUserId: TEAMS }
+    )
+    expect(rows.map((r) => [r.dimensionKey, r.resolution, r.finalValue])).toEqual([
+      ['criterion_1', 'Escalated', null],
+      ['criterion_2', 'Adjudicated', 1],
+    ])
+  })
+
+  it('groups per team, so training batches yield one row per disagreeing pair', () => {
+    // Two teams scored the same item × criterion; only Team 2 disagreed.
+    const rows = buildDiscrepancyRows(
+      [
+        raw({ userId: 'u-abi', value: 2 }),
+        raw({ userId: 'u-luofan', value: 2 }),
+        raw({ userId: 'u-jon', value: 1 }),
+        raw({ userId: 'u-mei', value: 3 }),
+      ],
+      [
+        // Team 1's final should not be mistaken for Team 2's.
+        {
+          feedbackItemId: 'i1',
+          ownerUserId: 'u-abi',
+          dimensionKey: 'criterion_1',
+          value: 2,
+          notes: null,
+          recordedByEmail: null,
+        },
+      ],
+      [],
+      { teamByUserId: TEAMS }
+    )
+    expect(rows).toHaveLength(1)
+    expect(rows[0].teamName).toBe('Team 2')
+    expect(rows[0].difference).toBe(2)
+    expect(rows[0].resolution).toBe('Unresolved')
+  })
+
+  it('orders rows by batch, then item, then rubric order', () => {
+    const rows = buildDiscrepancyRows(
+      [
+        raw({ userId: 'u-abi', value: 1, feedbackItemId: 'i2', item: item({ feedbackId: 'F2' }), dimensionKey: 'criterion_2', dimensionSortOrder: 2 }),
+        raw({ userId: 'u-luofan', value: 2, feedbackItemId: 'i2', item: item({ feedbackId: 'F2' }), dimensionKey: 'criterion_2', dimensionSortOrder: 2 }),
+        raw({ userId: 'u-abi', value: 1, feedbackItemId: 'i2', item: item({ feedbackId: 'F2' }) }),
+        raw({ userId: 'u-luofan', value: 2, feedbackItemId: 'i2', item: item({ feedbackId: 'F2' }) }),
+        raw({ userId: 'u-abi', value: 1, item: item({ feedbackId: 'F1' }), batch: { ...BATCH, batchName: 'Batch 9', batchSortOrder: 9 } }),
+        raw({ userId: 'u-luofan', value: 2, item: item({ feedbackId: 'F1' }), batch: { ...BATCH, batchName: 'Batch 9', batchSortOrder: 9 } }),
+      ],
+      [],
+      [],
+      { teamByUserId: TEAMS }
+    )
+    expect(rows.map((r) => [r.batchName, r.feedbackId, r.dimensionKey])).toEqual([
+      ['Batch 9', 'F1', 'criterion_1'],
+      ['Batch 45', 'F2', 'criterion_1'],
+      ['Batch 45', 'F2', 'criterion_2'],
+    ])
+  })
+
+  it('pins the column order', () => {
+    expect(discrepancyHeader()).toEqual([
+      'Response_ID',
+      'Student_ID',
+      'Cycle_ID',
+      'Activity_ID',
+      'Conjunction_ID',
+      'Student_Text',
+      'Feedback_Source',
+      'Teacher_ID',
+      'Feedback_Text',
+      'optimal',
+      'feedback_type',
+      'Feedback_ID',
+      'Batch_Name',
+      'Batch_Type',
+      'Batch_Status',
+      'Team_Name',
+      'Dimension_Key',
+      'Dimension_Label',
+      'Evaluator_A_Email',
+      'Evaluator_A_Score',
+      'Evaluator_A_Notes',
+      'Evaluator_B_Email',
+      'Evaluator_B_Score',
+      'Evaluator_B_Notes',
+      'Difference',
+      'Final_Score',
+      'Resolution',
+      'Final_Recorded_By',
+      'Reconciliation_Notes',
+    ])
+    expect(discrepancyHeader()).toHaveLength(12 + DISCREPANCY_COLUMNS.length)
+  })
+
+  it('renders cells in header order, with a blank Final_Score when unresolved', () => {
+    const [row] = buildDiscrepancyRows(
+      [raw({ userId: 'u-abi', value: 1 }), raw({ userId: 'u-luofan', value: 3 })],
+      [],
+      [],
+      { teamByUserId: TEAMS }
+    )
+    const cells = discrepancyCells(row)
+    expect(cells).toHaveLength(discrepancyHeader().length)
+    const at = (name: string) => cells[discrepancyHeader().indexOf(name)]
+    expect(at('Feedback_ID')).toBe('F2475')
+    expect(at('Feedback_Source')).toBe('HUMAN')
+    expect(at('Batch_Name')).toBe('Batch 45')
+    expect(at('Team_Name')).toBe('Team 1')
+    expect(at('Evaluator_A_Score')).toBe('1')
+    expect(at('Evaluator_B_Score')).toBe('3')
+    expect(at('Difference')).toBe('2')
+    expect(at('Final_Score')).toBe('')
+    expect(at('Resolution')).toBe('Unresolved')
+  })
+})
+
+describe('buildDiscrepancyFilename', () => {
+  it('keeps the original per-batch name', () => {
+    expect(
+      buildDiscrepancyFilename({ kind: 'batch', batchName: 'Batch 45' }, '2026-09-08')
+    ).toBe('discrepancies-Batch-45-2026-09-08.csv')
+  })
+
+  it('names the aggregate by its scope', () => {
+    expect(
+      buildDiscrepancyFilename(
+        { kind: 'all-double-scored', completeBatchesOnly: false },
+        '2026-09-08'
+      )
+    ).toBe('discrepancies-all-double-scored-2026-09-08.csv')
+    expect(
+      buildDiscrepancyFilename(
+        { kind: 'all-double-scored', completeBatchesOnly: true },
+        '2026-09-08'
+      )
+    ).toBe('discrepancies-all-double-scored-complete-2026-09-08.csv')
   })
 })

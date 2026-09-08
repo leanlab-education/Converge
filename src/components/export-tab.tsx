@@ -8,8 +8,8 @@
 // Conjunction above three cards while only two of them honoured it.
 //
 // Scope controls live *inside* the block they govern. The Discrepancy Report is
-// a different kind of artifact (a per-criterion QA comparison, batch-scoped),
-// so it keeps its own section below the divider.
+// a different kind of artifact (a per-criterion QA comparison scoped to paired
+// batches), so it keeps its own section below the divider.
 
 import { useCallback, useEffect, useState } from 'react'
 import { Download, Loader2 } from 'lucide-react'
@@ -19,6 +19,7 @@ import { Separator } from '@/components/ui/separator'
 import { cn } from '@/lib/utils'
 import {
   BATCH_COLUMNS,
+  DISCREPANCY_COLUMNS,
   ITEM_COLUMNS,
   SCORER_COLUMNS,
   SCORER_TRAILING_COLUMNS,
@@ -30,8 +31,19 @@ interface BatchOption {
   id: string
   name: string
   status: string
+  type: string
+  isDoubleScored: boolean
   activityId: string | null
   conjunctionId: string | null
+}
+
+/** Value of the discrepancy batch picker when the aggregate is selected. */
+const ALL_DOUBLE_SCORED = '__all-double-scored__'
+
+const BATCH_STATUS_LABEL: Record<string, string> = {
+  SCORING: 'Scoring',
+  RECONCILING: 'Reconciling',
+  COMPLETE: 'Complete',
 }
 
 interface ExportTabProps {
@@ -80,17 +92,12 @@ export function ExportTab({
   const [conjunctionId, setConjunctionId] = useState('')
   const [completeItemsOnly, setCompleteItemsOnly] = useState(false)
   const [finalizedBatchesOnly, setFinalizedBatchesOnly] = useState(false)
-  const [discrepancyBatchId, setDiscrepancyBatchId] = useState('')
+  // Discrepancy report selection: the aggregate by default, since that is the
+  // file that gets handed off; a single batch is still one click away.
+  const [discrepancySelection, setDiscrepancySelection] =
+    useState(ALL_DOUBLE_SCORED)
+  const [discrepancyCompleteOnly, setDiscrepancyCompleteOnly] = useState(false)
 
-  // The summary is keyed by the selection it describes, so "still calculating"
-  // is derived from whether the stored result matches the current selection
-  // rather than tracked as its own state.
-  const [summary, setSummary] = useState<{
-    key: string
-    rowCount: number
-    columnCount: number
-    error: string | null
-  } | null>(null)
 
   // The completeness toggles describe a *finished* set of scores, which only
   // has a defined meaning once the row is one item. Rather than silently
@@ -117,42 +124,7 @@ export function ExportTab({
   ])
 
   const selectionKey = buildParams().toString()
-
-  // Keep the summary in step with the current selection so the admin knows what
-  // the file holds before downloading it.
-  useEffect(() => {
-    let cancelled = false
-
-    fetch(`/api/export/count?${selectionKey}`)
-      .then(async (res) => {
-        if (!res.ok) throw new Error(String(res.status))
-        return res.json()
-      })
-      .then((data) => {
-        if (cancelled) return
-        setSummary({
-          key: selectionKey,
-          rowCount: data.rowCount,
-          columnCount: data.columnCount,
-          error: null,
-        })
-      })
-      .catch(() => {
-        if (cancelled) return
-        setSummary({
-          key: selectionKey,
-          rowCount: 0,
-          columnCount: 0,
-          error: 'Could not calculate row count',
-        })
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [selectionKey])
-
-  const summaryReady = summary?.key === selectionKey ? summary : null
+  const summaryReady = useExportSummary(selectionKey)
 
   function handleDownload() {
     window.open(`/api/export?${buildParams().toString()}`, '_blank')
@@ -180,8 +152,35 @@ export function ExportTab({
         ...SCORER_TRAILING_COLUMNS,
       ]
 
-  const reconcilingBatches = batches.filter(
-    (b) => b.status === 'RECONCILING' || b.status === 'COMPLETE'
+  // Only paired batches can have discrepancies: double-scored regular batches
+  // and training batches (where every team member scores every item). An
+  // independent regular batch has one score per cell, so it never appears.
+  const doubleScoredBatches = batches.filter(
+    (b) => b.type === 'REGULAR' && b.isDoubleScored && b.status !== 'DRAFT'
+  )
+  const trainingBatches = batches.filter(
+    (b) => b.type === 'TRAINING' && b.status !== 'DRAFT'
+  )
+  const completeDoubleScoredCount = doubleScoredBatches.filter(
+    (b) => b.status === 'COMPLETE'
+  ).length
+
+  const isAggregate = discrepancySelection === ALL_DOUBLE_SCORED
+  const discrepancyParams = new URLSearchParams({
+    projectId,
+    type: 'discrepancies',
+  })
+  if (isAggregate) {
+    discrepancyParams.set('batches', 'all-double-scored')
+    if (discrepancyCompleteOnly) discrepancyParams.set('completeBatchesOnly', '1')
+  } else {
+    discrepancyParams.set('batchId', discrepancySelection)
+  }
+  const discrepancyKey = discrepancyParams.toString()
+  const hasPairedBatches =
+    doubleScoredBatches.length > 0 || trainingBatches.length > 0
+  const discrepancySummary = useExportSummary(
+    hasPairedBatches ? discrepancyKey : null
   )
 
   return (
@@ -336,24 +335,7 @@ export function ExportTab({
 
         {/* ---- Summary + action ---- */}
         <div className="flex flex-wrap items-center justify-between gap-4 border-t border-border pt-4">
-          <p className="text-sm text-muted-foreground" aria-live="polite">
-            {!summaryReady ? (
-              <span className="flex items-center gap-2">
-                <Loader2 className="h-3 w-3 animate-spin" />
-                Calculating…
-              </span>
-            ) : summaryReady.error ? (
-              <span className="text-destructive">{summaryReady.error}</span>
-            ) : (
-              <>
-                <span className="font-medium text-foreground">
-                  {summaryReady.rowCount.toLocaleString()}
-                </span>{' '}
-                {summaryReady.rowCount === 1 ? 'row' : 'rows'} ·{' '}
-                {summaryReady.columnCount} columns
-              </>
-            )}
-          </p>
+          <ExportSummaryLine summary={summaryReady} />
           <Button
             onClick={handleDownload}
             disabled={summaryReady?.error === null && summaryReady.rowCount === 0}
@@ -368,52 +350,102 @@ export function ExportTab({
       <Separator />
 
       {/* ================= Discrepancy report ================= */}
-      <section className="space-y-4">
+      <section className="space-y-6">
         <div>
           <h2 className="text-lg font-semibold">Discrepancy Report</h2>
           <p className="mt-1 text-sm text-muted-foreground">
             A QA view of where two annotators disagreed, one row per criterion,
-            with each scorer&apos;s value, their notes, and the reconciliation
-            rationale.
+            with each scorer&apos;s value and notes, the final score the pair
+            landed on, how it was resolved, and the reconciliation rationale.
           </p>
         </div>
 
-        {reconcilingBatches.length === 0 ? (
+        {!hasPairedBatches ? (
           <p className="text-sm italic text-muted-foreground">
-            No batches are in reconciliation or complete yet.
+            No double-scored or training batches have been released yet.
           </p>
         ) : (
-          <div className="flex flex-wrap items-center gap-3">
-            <select
-              aria-label="Batch for discrepancy report"
-              className="flex h-8 rounded-md border border-input bg-background px-2 py-1 text-sm shadow-sm transition-all duration-200"
-              value={discrepancyBatchId}
-              onChange={(e) => setDiscrepancyBatchId(e.target.value)}
-            >
-              <option value="">Select batch…</option>
-              {reconcilingBatches.map((b) => (
-                <option key={b.id} value={b.id}>
-                  {b.name}
-                </option>
-              ))}
-            </select>
-            <Button
-              variant="outline"
-              disabled={!discrepancyBatchId}
-              onClick={() => {
-                const params = new URLSearchParams({
-                  projectId,
-                  type: 'discrepancies',
-                  batchId: discrepancyBatchId,
-                })
-                window.open(`/api/export?${params.toString()}`, '_blank')
-              }}
-              className="transition-all duration-200"
-            >
-              <Download className="mr-2 h-4 w-4" />
-              Download CSV
-            </Button>
-          </div>
+          <>
+            <fieldset className="space-y-3">
+              <legend className="text-sm font-medium">Batches</legend>
+              <div className="flex flex-wrap items-center gap-3">
+                <select
+                  aria-label="Batches for discrepancy report"
+                  className="flex h-8 rounded-md border border-input bg-background px-2 py-1 text-sm shadow-sm transition-all duration-200"
+                  value={discrepancySelection}
+                  onChange={(e) => setDiscrepancySelection(e.target.value)}
+                >
+                  <option value={ALL_DOUBLE_SCORED}>
+                    All double-scored batches ({doubleScoredBatches.length})
+                  </option>
+                  {doubleScoredBatches.length > 0 && (
+                    <optgroup label="Double-scored">
+                      {doubleScoredBatches.map((b) => (
+                        <option key={b.id} value={b.id}>
+                          {b.name} · {BATCH_STATUS_LABEL[b.status] ?? b.status}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {trainingBatches.length > 0 && (
+                    <optgroup label="Training">
+                      {trainingBatches.map((b) => (
+                        <option key={b.id} value={b.id}>
+                          {b.name} · {BATCH_STATUS_LABEL[b.status] ?? b.status}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                </select>
+              </div>
+
+              <ScopeToggle
+                id="discrepancy-complete-only"
+                checked={isAggregate && discrepancyCompleteOnly}
+                disabled={!isAggregate}
+                onChange={setDiscrepancyCompleteOnly}
+                label="Only completed batches"
+                hint={`Every discrepancy reconciled or adjudicated. ${completeDoubleScoredCount} of ${doubleScoredBatches.length} double-scored ${doubleScoredBatches.length === 1 ? 'batch is' : 'batches are'} complete.`}
+                disabledHint="Available when exporting all double-scored batches."
+              />
+            </fieldset>
+
+            <div className="rounded-lg border border-border bg-muted/30 p-4">
+              <p className="text-xs font-medium">Columns in this file</p>
+              <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+                {[...ITEM_COLUMNS, ...DISCREPANCY_COLUMNS].join(', ')}
+              </p>
+              <p className="mt-2 text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">Final_Score</span>{' '}
+                is the value the pair recorded (or the adjudicator, when
+                escalated).{' '}
+                <span className="font-medium text-foreground">Resolution</span>{' '}
+                reads Reconciled, Adjudicated, Escalated (awaiting the
+                adjudicator), or Unresolved (no final yet). Rows where the two
+                annotators agreed are not included.
+                {isAggregate &&
+                  ' Training batches are excluded from the aggregate; pick one from the list to export it on its own.'}
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-4 border-t border-border pt-4">
+              <ExportSummaryLine summary={discrepancySummary} />
+              <Button
+                variant="outline"
+                disabled={
+                  discrepancySummary?.error === null &&
+                  discrepancySummary.rowCount === 0
+                }
+                onClick={() => {
+                  window.open(`/api/export?${discrepancyKey}`, '_blank')
+                }}
+                className="transition-all duration-200"
+              >
+                <Download className="mr-2 h-4 w-4" />
+                Download CSV
+              </Button>
+            </div>
+          </>
         )}
       </section>
     </div>
@@ -460,5 +492,82 @@ function ScopeToggle({
         </span>
       </span>
     </label>
+  )
+}
+
+interface ExportSummary {
+  key: string
+  rowCount: number
+  columnCount: number
+  error: string | null
+}
+
+/**
+ * Row/column count for an export selection, from `/api/export/count`.
+ *
+ * The result is keyed by the selection it describes, so "still calculating"
+ * is derived from whether the stored result matches the current selection
+ * rather than tracked as its own state. Returns null while calculating, or
+ * when there is no selection to describe.
+ */
+function useExportSummary(selectionKey: string | null): ExportSummary | null {
+  const [summary, setSummary] = useState<ExportSummary | null>(null)
+
+  useEffect(() => {
+    if (!selectionKey) return
+    let cancelled = false
+
+    fetch(`/api/export/count?${selectionKey}`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(String(res.status))
+        return res.json()
+      })
+      .then((data) => {
+        if (cancelled) return
+        setSummary({
+          key: selectionKey,
+          rowCount: data.rowCount,
+          columnCount: data.columnCount,
+          error: null,
+        })
+      })
+      .catch(() => {
+        if (cancelled) return
+        setSummary({
+          key: selectionKey,
+          rowCount: 0,
+          columnCount: 0,
+          error: 'Could not calculate row count',
+        })
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [selectionKey])
+
+  return selectionKey && summary?.key === selectionKey ? summary : null
+}
+
+function ExportSummaryLine({ summary }: { summary: ExportSummary | null }) {
+  return (
+    <p className="text-sm text-muted-foreground" aria-live="polite">
+      {!summary ? (
+        <span className="flex items-center gap-2">
+          <Loader2 className="h-3 w-3 animate-spin" />
+          Calculating…
+        </span>
+      ) : summary.error ? (
+        <span className="text-destructive">{summary.error}</span>
+      ) : (
+        <>
+          <span className="font-medium text-foreground">
+            {summary.rowCount.toLocaleString()}
+          </span>{' '}
+          {summary.rowCount === 1 ? 'row' : 'rows'} · {summary.columnCount}{' '}
+          columns
+        </>
+      )}
+    </p>
   )
 }
