@@ -5,8 +5,11 @@
 import { prisma } from '@/lib/db'
 import type { Prisma } from '@/generated/prisma/client'
 import {
+  buildDiscrepancyRows,
   buildItemGrainRows,
   buildScorerGrainRows,
+  discrepancyCells,
+  discrepancyHeader,
   hasFullScoreSet,
   isItemGrain,
   itemGrainCells,
@@ -296,6 +299,180 @@ export async function countExportRows(
     },
   })
   return pairs.length
+}
+
+// ---------------------------------------------------------------------------
+// Discrepancy report
+// ---------------------------------------------------------------------------
+
+/**
+ * Which batches the report covers.
+ *
+ *   - `batch`: one batch by id (the original, still-supported form — `batchId`
+ *     in the URL). Any paired batch qualifies, including TRAINING.
+ *   - `all-double-scored`: every released double-scored REGULAR batch in the
+ *     project, optionally narrowed to COMPLETE ones. TRAINING batches are left
+ *     out of the aggregate on purpose: they are calibration, not study data,
+ *     and this file is what gets handed to Quill (Amber, 2026-09-08).
+ */
+export type DiscrepancyScope =
+  | { kind: 'batch'; projectId: string; batchId: string }
+  | { kind: 'all-double-scored'; projectId: string; completeBatchesOnly: boolean }
+
+/** Returns null when neither a batchId nor `batches=all-double-scored` is given. */
+export function parseDiscrepancyScope(
+  params: URLSearchParams,
+  projectId: string
+): DiscrepancyScope | null {
+  const batchId = params.get('batchId')
+  if (batchId) return { kind: 'batch', projectId, batchId }
+  if (params.get('batches') === 'all-double-scored') {
+    return {
+      kind: 'all-double-scored',
+      projectId,
+      completeBatchesOnly: params.get('completeBatchesOnly') === '1',
+    }
+  }
+  return null
+}
+
+function discrepancyBatchWhere(scope: DiscrepancyScope): Prisma.BatchWhereInput {
+  if (scope.kind === 'batch') {
+    return { id: scope.batchId, projectId: scope.projectId }
+  }
+  return {
+    projectId: scope.projectId,
+    type: 'REGULAR',
+    isDoubleScored: true,
+    status: scope.completeBatchesOnly ? 'COMPLETE' : { not: 'DRAFT' },
+  }
+}
+
+/**
+ * The batches a scope resolves to. For a single-batch scope an empty result
+ * means the batch doesn't exist in this project — the route turns that into a
+ * 404 rather than an empty file.
+ */
+export async function resolveDiscrepancyBatches(scope: DiscrepancyScope) {
+  return prisma.batch.findMany({
+    where: discrepancyBatchWhere(scope),
+    select: { id: true, name: true, type: true, status: true, sortOrder: true },
+    orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+  })
+}
+
+async function loadDiscrepancyRows(projectId: string, batchIds: string[]) {
+  if (batchIds.length === 0) return []
+  const itemWhere: Prisma.FeedbackItemWhereInput = { batchId: { in: batchIds } }
+
+  const [rawScores, finals, escalations, teamMemberships] = await Promise.all([
+    prisma.score.findMany({
+      where: { feedbackItem: itemWhere, isReconciled: false },
+      select: {
+        feedbackItemId: true,
+        value: true,
+        notes: true,
+        user: { select: { id: true, email: true } },
+        dimension: { select: { key: true, label: true, sortOrder: true } },
+        feedbackItem: {
+          select: {
+            responseId: true,
+            studentId: true,
+            cycleId: true,
+            activityId: true,
+            conjunctionId: true,
+            studentText: true,
+            feedbackSource: true,
+            teacherId: true,
+            feedbackText: true,
+            optimal: true,
+            feedbackType: true,
+            feedbackId: true,
+            batch: {
+              select: { name: true, type: true, status: true, sortOrder: true },
+            },
+          },
+        },
+      },
+    }),
+    prisma.score.findMany({
+      where: { feedbackItem: itemWhere, isReconciled: true },
+      select: {
+        feedbackItemId: true,
+        userId: true,
+        value: true,
+        notes: true,
+        dimension: { select: { key: true } },
+        reconciledBy: { select: { email: true } },
+      },
+    }),
+    prisma.escalation.findMany({
+      where: { batchId: { in: batchIds } },
+      select: {
+        feedbackItemId: true,
+        resolvedAt: true,
+        dimension: { select: { key: true } },
+        teamRelease: { select: { teamId: true } },
+      },
+    }),
+    prisma.evaluatorTeamMember.findMany({
+      where: { team: { projectId } },
+      select: { userId: true, team: { select: { id: true, name: true } } },
+    }),
+  ])
+
+  const teamByUserId = new Map<string, { id: string; name: string }>()
+  for (const tm of teamMemberships) teamByUserId.set(tm.userId, tm.team)
+
+  return buildDiscrepancyRows(
+    rawScores.map((score) => ({
+      feedbackItemId: score.feedbackItemId,
+      userId: score.user.id,
+      userEmail: score.user.email,
+      dimensionKey: score.dimension.key,
+      dimensionLabel: score.dimension.label,
+      dimensionSortOrder: score.dimension.sortOrder,
+      value: score.value,
+      notes: score.notes,
+      item: toItemFields(score.feedbackItem),
+      batch: {
+        batchName: score.feedbackItem.batch?.name ?? '',
+        batchType: score.feedbackItem.batch?.type ?? '',
+        batchStatus: score.feedbackItem.batch?.status ?? '',
+        batchSortOrder: score.feedbackItem.batch?.sortOrder ?? 0,
+      },
+    })),
+    finals.map((final) => ({
+      feedbackItemId: final.feedbackItemId,
+      ownerUserId: final.userId,
+      dimensionKey: final.dimension.key,
+      value: final.value,
+      notes: final.notes,
+      recordedByEmail: final.reconciledBy?.email ?? null,
+    })),
+    escalations.map((escalation) => ({
+      feedbackItemId: escalation.feedbackItemId,
+      teamId: escalation.teamRelease.teamId,
+      dimensionKey: escalation.dimension.key,
+      resolved: escalation.resolvedAt !== null,
+    })),
+    { teamByUserId }
+  )
+}
+
+export async function buildDiscrepancyCsv(
+  projectId: string,
+  batchIds: string[]
+): Promise<{ header: string[]; rows: string[][] }> {
+  const rows = await loadDiscrepancyRows(projectId, batchIds)
+  return { header: discrepancyHeader(), rows: rows.map(discrepancyCells) }
+}
+
+export async function countDiscrepancyRows(
+  projectId: string,
+  batchIds: string[]
+): Promise<number> {
+  return (await loadDiscrepancyRows(projectId, batchIds)).length
 }
 
 // ---------------------------------------------------------------------------

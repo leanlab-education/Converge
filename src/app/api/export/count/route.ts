@@ -4,15 +4,19 @@
 import { auth } from '@/lib/auth'
 import { canAdminProject } from '@/lib/authorization'
 import {
+  discrepancyHeader,
   isItemGrain,
   itemGrainHeader,
   parseExportKind,
   scorerGrainHeader,
 } from '@/lib/export'
 import {
+  countDiscrepancyRows,
   countExportRows,
   getProjectDimensions,
+  parseDiscrepancyScope,
   parseExportScope,
+  resolveDiscrepancyBatches,
 } from '@/lib/export-query'
 import { NextRequest, NextResponse } from 'next/server'
 
@@ -34,11 +38,31 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
-  if (!kind || kind === 'discrepancies') {
-    return NextResponse.json(
-      { error: 'type must be a score-table export kind' },
-      { status: 400 }
+  if (!kind) {
+    return NextResponse.json({ error: 'Unknown export type' }, { status: 400 })
+  }
+
+  if (kind === 'discrepancies') {
+    const scope = parseDiscrepancyScope(params, projectId)
+    if (!scope) {
+      return NextResponse.json(
+        { error: 'discrepancy export needs batchId or batches=all-double-scored' },
+        { status: 400 }
+      )
+    }
+    const batches = await resolveDiscrepancyBatches(scope)
+    if (scope.kind === 'batch' && batches.length === 0) {
+      return NextResponse.json({ error: 'Batch not found' }, { status: 404 })
+    }
+    const rowCount = await countDiscrepancyRows(
+      projectId,
+      batches.map((b) => b.id)
     )
+    return NextResponse.json({
+      rowCount,
+      columnCount: discrepancyHeader().length,
+      batchCount: batches.length,
+    })
   }
 
   const { dimensionKeys, dimensionLabels } =

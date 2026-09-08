@@ -245,7 +245,7 @@ every raw score can't exist: two annotators' values don't fit one cell).
 | `raw-by-scorer` | item × scorer | every score as entered | for IRR. Legacy alias: `original` |
 | `final-by-scorer` | item × scorer | final values | Legacy alias: `reconciled` |
 | `final-by-item` | one per `Feedback_ID` | final values | the "collapsed" export, for CZI handoff (Amber, 2026-07-28) |
-| `discrepancies` | item × criterion | both raw values + diff | batch-scoped QA report, own shape |
+| `discrepancies` | item × criterion × team | both raw values + diff + final | QA "journey" report, own shape; one batch or all double-scored |
 
 - **Legacy aliases are permanent** — `original` and `reconciled` still resolve, so
   bookmarked URLs and scripts keep working. Verified byte-identical to the
@@ -267,10 +267,30 @@ every raw score can't exist: two annotators' values don't fit one cell).
     when every team release completed (everyone scored, all discrepancies
     reconciled, all escalations adjudicated).
 
+**Discrepancy report** (redesigned 2026-09-08 for Peter/Quill via Amber):
+- Scope is `batchId=<id>` (any paired batch, incl. TRAINING) **or**
+  `batches=all-double-scored` (+ optional `completeBatchesOnly=1`). The
+  aggregate covers released double-scored REGULAR batches only — training is
+  calibration, not study data, so it is excluded from the handoff file but
+  still exportable one batch at a time.
+- Columns: the 12 item columns (so the reader sees the student response and
+  feedback text), `Batch_Name, Batch_Type, Batch_Status, Team_Name`, criterion,
+  both annotators' score + notes, `Difference`, then the journey:
+  `Final_Score`, `Resolution` (Reconciled / Adjudicated / Escalated /
+  Unresolved), `Final_Recorded_By` (from `Score.reconciledById`),
+  `Reconciliation_Notes`. Column order pinned in `export.test.ts`.
+- Rows are grouped per (item × criterion × **team**), so training batches with
+  several teams on the same item produce one row per disagreeing pair; the
+  pre-2026-09 route skipped those. Scorer A/B are alphabetical by email.
+- Only rows where the pair disagreed. Cells with ≠ 2 raw scores are skipped.
+- The Export tab's dropdown lists only paired batches (double-scored regular
+  and training), defaulting to the aggregate; `/api/export/count` supports
+  `type=discrepancies` so the summary line works there too.
+
 **Code layout** — do not put query logic back in the route:
 - `src/lib/export.ts` — pure, no Prisma: kind parsing, column definitions, row
-  builders, `csvEscape`, filenames. Unit-tested in `export.test.ts`, which pins
-  the exact column order for both grains.
+  builders (incl. `buildDiscrepancyRows`), `csvEscape`, filenames. Unit-tested
+  in `export.test.ts`, which pins the exact column order for every shape.
 - `src/lib/export-query.ts` — Prisma queries + scope rules, shared by the
   download and count routes so they can't drift.
 - `src/app/api/export/route.ts` — auth + dispatch only.
