@@ -57,7 +57,7 @@ export async function sendInviteEmail(
 export async function sendResetEmail(email: string, token: string) {
   const url = `${getAppUrl()}/reset-password/${token}`
 
-  await getResend().emails.send({
+  const { error } = await getResend().emails.send({
     from: FROM_EMAIL,
     to: email,
     subject: 'Reset your password — Writing Evaluator',
@@ -75,4 +75,7 @@ export async function sendResetEmail(email: string, token: string) {
       </div>
     `,
   })
+
+  // Resend reports failures in the result rather than throwing.
+  if (error) throw new Error(`Resend failed to send reset email: ${error.message}`)
 }

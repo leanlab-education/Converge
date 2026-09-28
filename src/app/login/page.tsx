@@ -16,6 +16,12 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { Loader2 } from 'lucide-react'
+import {
+  PASSWORD_SIGN_IN_MESSAGES,
+  STUDYFLOW_SIGN_IN_MESSAGES,
+  classifySignInFailure,
+  isSignInFailure,
+} from '@/lib/auth-errors'
 
 function LoginForm() {
   const router = useRouter()
@@ -24,32 +30,30 @@ function LoginForm() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-  const [autoLogging, setAutoLogging] = useState(false)
+
+  const studyflowToken = searchParams.get('studyflow_token')
+  const studyflowEmail = searchParams.get('email')
+  const isStudyflowLaunch = !!(studyflowToken && studyflowEmail)
+  // Set after a failed StudyFlow launch. Kept in the URL (not state) so a
+  // refresh still shows the StudyFlow screen rather than the password form.
+  const studyflowFailure = searchParams.get('studyflow')
 
   // StudyFlow magic link auto-login
   useEffect(() => {
-    const token = searchParams.get('studyflow_token')
-    const tokenEmail = searchParams.get('email')
+    if (!studyflowToken || !studyflowEmail) return
 
-    if (token && tokenEmail) {
-      setAutoLogging(true)
-      signIn('credentials', {
-        email: tokenEmail,
-        studyflow_token: token,
-        redirect: false,
-      }).then((result) => {
-        if (result?.error) {
-          setAutoLogging(false)
-          setError('StudyFlow login failed. Please sign in manually.')
-          // Strip the token from browser history so it can't be reused
-          window.history.replaceState({}, '', '/login')
-        } else {
-          // Replace (not push) so the token URL is removed from browser history
-          router.replace('/')
-        }
+    signIn('credentials', {
+      email: studyflowEmail,
+      studyflow_token: studyflowToken,
+      redirect: false,
+    })
+      .then(classifySignInFailure, () => 'unavailable' as const)
+      .then((failure) => {
+        // Replace (not push) so the token URL is removed from browser history
+        // and can't be reused.
+        router.replace(failure ? `/login?studyflow=${failure}` : '/')
       })
-    }
-  }, [searchParams, router])
+  }, [studyflowToken, studyflowEmail, router])
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -63,24 +67,39 @@ function LoginForm() {
         redirect: false,
       })
 
-      if (result?.error) {
-        setError('Invalid email or password')
+      const failure = classifySignInFailure(result)
+      if (failure) {
+        setError(PASSWORD_SIGN_IN_MESSAGES[failure])
       } else {
         router.push('/')
       }
     } catch {
-      setError('Something went wrong. Please try again.')
+      setError(PASSWORD_SIGN_IN_MESSAGES.unavailable)
     } finally {
       setLoading(false)
     }
   }
 
-  if (autoLogging) {
+  if (isStudyflowLaunch) {
     return (
       <div className="flex flex-col items-center gap-3">
         <Loader2 className="size-8 animate-spin text-muted-foreground" />
         <p className="text-sm text-muted-foreground">Signing in from StudyFlow...</p>
       </div>
+    )
+  }
+
+  // StudyFlow annotators have no password here, so a failed launch gets its
+  // own screen with no password form or reset link — only "go back to
+  // StudyFlow", which mints a fresh link.
+  if (isSignInFailure(studyflowFailure)) {
+    return (
+      <Card className="w-full max-w-md shadow-lg text-center">
+        <CardHeader>
+          <CardTitle className="text-2xl">Couldn&apos;t sign you in</CardTitle>
+          <CardDescription>{STUDYFLOW_SIGN_IN_MESSAGES[studyflowFailure]}</CardDescription>
+        </CardHeader>
+      </Card>
     )
   }
 
