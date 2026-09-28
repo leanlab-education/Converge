@@ -13,24 +13,36 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { Mail } from 'lucide-react'
+import { RESET_UNAVAILABLE_MESSAGE } from '@/lib/auth-errors'
 
 export default function ResetPasswordPage() {
   const [email, setEmail] = useState('')
   const [loading, setLoading] = useState(false)
   const [sent, setSent] = useState(false)
+  const [error, setError] = useState('')
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
+    setError('')
     setLoading(true)
 
-    await fetch('/api/reset-password', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: email.trim() }),
-    })
-
-    setSent(true)
-    setLoading(false)
+    try {
+      const res = await fetch('/api/reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: email.trim() }),
+      })
+      // Only claim a link was sent when the server says so — never on failure.
+      if (res.ok) {
+        setSent(true)
+      } else {
+        setError(RESET_UNAVAILABLE_MESSAGE)
+      }
+    } catch {
+      setError(RESET_UNAVAILABLE_MESSAGE)
+    } finally {
+      setLoading(false)
+    }
   }
 
   if (sent) {
@@ -80,6 +92,9 @@ export default function ResetPasswordPage() {
                 required
               />
             </div>
+            {error && (
+              <p className="text-sm text-destructive">{error}</p>
+            )}
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? 'Sending...' : 'Send Reset Link'}
             </Button>
