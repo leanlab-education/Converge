@@ -1,10 +1,19 @@
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { canAdminProject } from '@/lib/authorization'
-import { BATCH_LOCKED_MESSAGE } from '@/lib/reconciliation-access'
 import { maybeAdvanceReleaseAfterScore } from '@/lib/reconciliation'
+import { evaluateScoreWrite } from '@/lib/score-write-scope'
 import { NextRequest, NextResponse } from 'next/server'
 
+// GET /api/scores?projectId=…[&batchId=…][&feedbackItemId=…]
+//
+// The caller's own RAW scores, for hydrating the scoring screen — its only
+// caller. Never returns reconciled finals: those are stored under the release
+// owner's userId, so the owner would otherwise receive the pair's final next
+// to their own raw row, and the screen showed (and, through the revise flow,
+// wrote back as raw) the final instead of what they actually scored. Admins
+// get their own rows too; the cross-annotator views live in the reconcile and
+// export routes.
 export async function GET(request: NextRequest) {
   const session = await auth()
   if (!session?.user) {
@@ -18,10 +27,10 @@ export async function GET(request: NextRequest) {
       { status: 400 }
     )
   }
-
+  const batchId = request.nextUrl.searchParams.get('batchId')
   const feedbackItemId = request.nextUrl.searchParams.get('feedbackItemId')
-  const isAdmin = await canAdminProject(session.user.id, session.user.role, projectId)
 
+  const isAdmin = await canAdminProject(session.user.id, session.user.role, projectId)
   if (!isAdmin) {
     const membership = await prisma.projectEvaluator.findUnique({
       where: { projectId_userId: { projectId, userId: session.user.id } },
@@ -33,17 +42,20 @@ export async function GET(request: NextRequest) {
 
   const scores = await prisma.score.findMany({
     where: {
-      feedbackItem: { projectId },
+      feedbackItem: { projectId, ...(batchId ? { batchId } : {}) },
       ...(feedbackItemId ? { feedbackItemId } : {}),
-      ...(!isAdmin ? { userId: session.user.id } : {}),
+      userId: session.user.id,
+      isReconciled: false,
     },
-    include: {
-      dimension: {
-        select: { key: true, label: true },
-      },
-      user: {
-        select: { id: true, email: true, name: true },
-      },
+    select: {
+      id: true,
+      feedbackItemId: true,
+      dimensionId: true,
+      value: true,
+      notes: true,
+      startedAt: true,
+      scoredAt: true,
+      isReconciled: true,
     },
     orderBy: [{ feedbackItemId: 'asc' }, { scoredAt: 'asc' }],
   })
@@ -51,34 +63,69 @@ export async function GET(request: NextRequest) {
   return NextResponse.json(scores)
 }
 
-export async function POST(request: Request) {
+interface ScoreWrite {
+  dimensionId: string
+  value: number
+}
+
+function isScoreWrite(value: unknown): value is ScoreWrite {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as { dimensionId?: unknown; value?: unknown }
+  return (
+    typeof candidate.dimensionId === 'string' &&
+    typeof candidate.value === 'number' &&
+    Number.isInteger(candidate.value)
+  )
+}
+
+// PUT /api/scores — the single raw-score write path (auto-save and Continue
+// both use it): upserts the caller's own raw row per criterion, partial or
+// full. Who may write what is decided by evaluateScoreWrite, so an admin
+// without an assignment, a teammate outside their slot, or a criterion
+// outside the team is refused with a 403 that says why.
+export async function PUT(request: Request) {
   const session = await auth()
   if (!session?.user) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const body = await request.json()
-  const { feedbackItemId, scores, notes, startedAt, durationSeconds } = body
+  const body = (await request.json()) as {
+    feedbackItemId?: unknown
+    scores?: unknown
+    notes?: unknown
+    startedAt?: unknown
+  }
+  const { feedbackItemId, notes, startedAt } = body
 
-  if (!feedbackItemId || !Array.isArray(scores) || scores.length === 0) {
+  if (typeof feedbackItemId !== 'string' || !feedbackItemId) {
     return NextResponse.json(
-      { error: 'feedbackItemId and scores array are required' },
+      { error: 'feedbackItemId is required' },
       { status: 400 }
     )
   }
-
-  // Verify the feedback item exists and user has access to its project
-  const feedbackItem = await prisma.feedbackItem.findUnique({
-    where: { id: feedbackItemId },
-    select: { id: true, projectId: true, batchId: true },
-  })
-  if (!feedbackItem) {
+  const scores: ScoreWrite[] = Array.isArray(body.scores) ? body.scores : []
+  if (!scores.every(isScoreWrite)) {
     return NextResponse.json(
-      { error: 'Feedback item not found' },
-      { status: 404 }
+      { error: 'Each score needs a dimensionId and an integer value' },
+      { status: 400 }
     )
   }
+  if (notes !== undefined && typeof notes !== 'string') {
+    return NextResponse.json({ error: 'notes must be a string' }, { status: 400 })
+  }
+  const startedAtDate =
+    typeof startedAt === 'string' && startedAt ? new Date(startedAt) : null
+  if (startedAtDate && Number.isNaN(startedAtDate.getTime())) {
+    return NextResponse.json({ error: 'startedAt must be a date' }, { status: 400 })
+  }
 
+  const feedbackItem = await prisma.feedbackItem.findUnique({
+    where: { id: feedbackItemId },
+    select: { projectId: true, batchId: true, slotIndex: true },
+  })
+  if (!feedbackItem) {
+    return NextResponse.json({ error: 'Feedback item not found' }, { status: 404 })
+  }
   const membership = await prisma.projectEvaluator.findUnique({
     where: { projectId_userId: { projectId: feedbackItem.projectId, userId: session.user.id } },
   })
@@ -86,65 +133,56 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
-  const isProjectAdmin = await canAdminProject(session.user.id, session.user.role, feedbackItem.projectId)
-
-  // Verify batch is in a scoreable state and not hidden from this user
-  let releaseId: string | null = null
-  if (feedbackItem.batchId) {
-    const [batch, assignment] = await Promise.all([
-      prisma.batch.findUnique({
-        where: { id: feedbackItem.batchId },
-        select: { status: true, isHidden: true, isLocked: true },
-      }),
-      prisma.batchAssignment.findFirst({
-        where: {
-          batchId: feedbackItem.batchId,
-          userId: session.user.id,
-          OR: [{ teamReleaseId: null }, { teamRelease: { isVisible: true } }],
-        },
-        select: {
-          id: true,
-          teamReleaseId: true,
-          teamRelease: {
-            select: {
-              isVisible: true,
-              status: true,
+  // The batch and the caller's assignment on it, with the release context the
+  // scope rules need (members in email order = slot order).
+  const [batch, assignment] = feedbackItem.batchId
+    ? await Promise.all([
+        prisma.batch.findUnique({
+          where: { id: feedbackItem.batchId },
+          select: { status: true, isHidden: true, isLocked: true },
+        }),
+        prisma.batchAssignment.findUnique({
+          where: {
+            batchId_userId: {
+              batchId: feedbackItem.batchId,
+              userId: session.user.id,
             },
           },
-        },
-      }),
-    ])
-    if (!batch) {
-      return NextResponse.json({ error: 'Batch not found' }, { status: 404 })
-    }
-    if (batch.isLocked) {
-      return NextResponse.json({ error: BATCH_LOCKED_MESSAGE }, { status: 423 })
-    }
-    if (batch.isHidden && !isProjectAdmin) {
-      return NextResponse.json({ error: 'Scoring is not open for this batch' }, { status: 403 })
-    }
-    if (!assignment && !isProjectAdmin) {
-      return NextResponse.json({ error: 'Scoring is not open for this batch' }, { status: 403 })
-    }
-    if (
-      assignment?.teamRelease &&
-      (!assignment.teamRelease.isVisible || assignment.teamRelease.status !== 'SCORING')
-    ) {
-      return NextResponse.json({ error: 'Scoring is not open for this release' }, { status: 403 })
-    }
-    if (!assignment?.teamRelease && (!batch || batch.status !== 'SCORING')) {
-      return NextResponse.json({ error: 'Scoring is not open for this batch' }, { status: 403 })
-    }
-    releaseId = assignment?.teamReleaseId ?? null
+          select: {
+            teamReleaseId: true,
+            teamRelease: {
+              select: {
+                id: true,
+                scorerUserId: true,
+                isVisible: true,
+                status: true,
+                batch: { select: { type: true, isDoubleScored: true } },
+                team: {
+                  select: {
+                    members: {
+                      select: { userId: true },
+                      orderBy: { user: { email: 'asc' } },
+                    },
+                    dimensions: { select: { dimensionId: true } },
+                  },
+                },
+              },
+            },
+          },
+        }),
+      ])
+    : [null, null]
+  if (feedbackItem.batchId && !batch) {
+    return NextResponse.json({ error: 'Batch not found' }, { status: 404 })
   }
 
-  // Validate each score's dimensionId belongs to this project and value is within scale
+  // Every criterion must be one of the project's, with a value on its scale.
   const dimensions = await prisma.rubricDimension.findMany({
     where: { projectId: feedbackItem.projectId },
     select: { id: true, scaleMin: true, scaleMax: true },
   })
   const dimMap = new Map(dimensions.map((d) => [d.id, d]))
-  for (const score of scores as { dimensionId: string; value: number }[]) {
+  for (const score of scores) {
     const dim = dimMap.get(score.dimensionId)
     if (!dim) {
       return NextResponse.json({ error: `Invalid dimension: ${score.dimensionId}` }, { status: 400 })
@@ -154,209 +192,71 @@ export async function POST(request: Request) {
     }
   }
 
-  // Create all score rows in a transaction
-  const result = await prisma.$transaction(async (tx) => {
-    const createdScores = await Promise.all(
-      scores.map(
-        (score: { dimensionId: string; value: number; rationale?: string }) =>
-          tx.score.create({
-            data: {
-              feedbackItemId,
-              userId: session.user.id,
-              dimensionId: score.dimensionId,
-              value: score.value,
-              rationale: score.rationale || null,
-              notes: notes || null,
-              startedAt: startedAt ? new Date(startedAt) : null,
-              durationSeconds: durationSeconds || null,
-            },
-          })
-      )
-    )
+  const access = evaluateScoreWrite({
+    item: { batchId: feedbackItem.batchId, slotIndex: feedbackItem.slotIndex },
+    batch,
+    assignment,
+    userId: session.user.id,
+    dimensionIds: scores.map((s) => s.dimensionId),
+    projectDimensionIds: dimensions.map((d) => d.id),
+  })
+  if (!access.ok) {
+    return NextResponse.json({ error: access.error }, { status: access.httpStatus })
+  }
 
-    // Update assignment status to COMPLETE if one exists for this user
-    await tx.assignment.updateMany({
+  // Upsert each criterion — sequentially, so two saves for the same item
+  // cannot interleave their rows.
+  const now = new Date()
+  for (const score of scores) {
+    const rowWhere = {
+      feedbackItemId,
+      userId: session.user.id,
+      dimensionId: score.dimensionId,
+      isReconciled: false,
+    }
+    const update = {
+      value: score.value,
+      scoredAt: now,
+      ...(notes !== undefined ? { notes } : {}),
+    }
+    try {
+      await prisma.score.upsert({
+        where: { feedbackItemId_userId_dimensionId_isReconciled: rowWhere },
+        update,
+        create: {
+          ...rowWhere,
+          value: score.value,
+          notes: notes || null,
+          startedAt: startedAtDate,
+        },
+      })
+    } catch (e: unknown) {
+      // P2002: a concurrent request inserted this row first — update it instead.
+      if ((e as { code?: string }).code === 'P2002') {
+        await prisma.score.updateMany({ where: rowWhere, data: update })
+      } else {
+        throw e
+      }
+    }
+  }
+
+  // startedAt records when the annotator first touched the item. It is set on
+  // create and never moved, so revisiting an item does not reset its timing;
+  // rows written before the client sent one are back-filled once.
+  if (startedAtDate) {
+    await prisma.score.updateMany({
       where: {
         feedbackItemId,
-        evaluator: {
-          userId: session.user.id,
-        },
+        userId: session.user.id,
+        isReconciled: false,
+        startedAt: null,
       },
-      data: {
-        status: 'COMPLETE',
-      },
+      data: { startedAt: startedAtDate },
     })
-
-    return createdScores
-  })
-
-  if (releaseId) {
-    try {
-      await maybeAdvanceReleaseAfterScore(releaseId)
-    } catch (err) {
-      console.error('Release advancement check failed:', err)
-    }
   }
 
-  return NextResponse.json(result, { status: 201 })
-}
-
-// PUT /api/scores — auto-save upsert (partial or full)
-export async function PUT(request: Request) {
-  const session = await auth()
-  if (!session?.user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
-
-  const body = await request.json()
-  const { feedbackItemId, scores, notes, startedAt } = body
-
-  if (!feedbackItemId) {
-    return NextResponse.json(
-      { error: 'feedbackItemId is required' },
-      { status: 400 }
-    )
-  }
-
-  // Verify the feedback item exists and user has access to its project
-  const feedbackItem = await prisma.feedbackItem.findUnique({
-    where: { id: feedbackItemId },
-    select: { projectId: true, batchId: true },
-  })
-  if (!feedbackItem) {
-    return NextResponse.json({ error: 'Feedback item not found' }, { status: 404 })
-  }
-  const putMembership = await prisma.projectEvaluator.findUnique({
-    where: { projectId_userId: { projectId: feedbackItem.projectId, userId: session.user.id } },
-  })
-  if (!putMembership) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
-  }
-
-  const isPutAdmin = await canAdminProject(session.user.id, session.user.role, feedbackItem.projectId)
-
-  // Verify batch is in a scoreable state and not hidden from this user
-  let releaseId: string | null = null
-  if (feedbackItem.batchId) {
-    const [batch, assignment] = await Promise.all([
-      prisma.batch.findUnique({
-        where: { id: feedbackItem.batchId },
-        select: { status: true, isHidden: true, isLocked: true },
-      }),
-      prisma.batchAssignment.findFirst({
-        where: {
-          batchId: feedbackItem.batchId,
-          userId: session.user.id,
-          OR: [{ teamReleaseId: null }, { teamRelease: { isVisible: true } }],
-        },
-        select: {
-          id: true,
-          teamReleaseId: true,
-          teamRelease: {
-            select: {
-              isVisible: true,
-              status: true,
-            },
-          },
-        },
-      }),
-    ])
-    if (!batch) {
-      return NextResponse.json({ error: 'Batch not found' }, { status: 404 })
-    }
-    if (batch.isLocked) {
-      return NextResponse.json({ error: BATCH_LOCKED_MESSAGE }, { status: 423 })
-    }
-    if (batch.isHidden && !isPutAdmin) {
-      return NextResponse.json({ error: 'Scoring is not open for this batch' }, { status: 403 })
-    }
-    if (!assignment && !isPutAdmin) {
-      return NextResponse.json({ error: 'Scoring is not open for this batch' }, { status: 403 })
-    }
-    if (
-      assignment?.teamRelease &&
-      (!assignment.teamRelease.isVisible || assignment.teamRelease.status !== 'SCORING')
-    ) {
-      return NextResponse.json({ error: 'Scoring is not open for this release' }, { status: 403 })
-    }
-    if (!assignment?.teamRelease && (!batch || batch.status !== 'SCORING')) {
-      return NextResponse.json({ error: 'Scoring is not open for this batch' }, { status: 403 })
-    }
-    releaseId = assignment?.teamReleaseId ?? null
-  }
-
-  // Validate score dimensions and values if scores are provided
-  if (Array.isArray(scores) && scores.length > 0) {
-    const dimensions = await prisma.rubricDimension.findMany({
-      where: { projectId: feedbackItem.projectId },
-      select: { id: true, scaleMin: true, scaleMax: true },
-    })
-    const dimMap = new Map(dimensions.map((d) => [d.id, d]))
-    for (const score of scores as { dimensionId: string; value: number }[]) {
-      const dim = dimMap.get(score.dimensionId)
-      if (!dim) {
-        return NextResponse.json({ error: `Invalid dimension: ${score.dimensionId}` }, { status: 400 })
-      }
-      if (score.value < dim.scaleMin || score.value > dim.scaleMax) {
-        return NextResponse.json({ error: `Score value must be between ${dim.scaleMin} and ${dim.scaleMax}` }, { status: 400 })
-      }
-    }
-  }
-
-  // Upsert each score dimension — run sequentially to avoid race conditions
-  if (Array.isArray(scores) && scores.length > 0) {
-    for (const score of scores as { dimensionId: string; value: number }[]) {
-      try {
-        await prisma.score.upsert({
-          where: {
-            feedbackItemId_userId_dimensionId_isReconciled: {
-              feedbackItemId,
-              userId: session.user.id,
-              dimensionId: score.dimensionId,
-              isReconciled: false,
-            },
-          },
-          update: {
-            value: score.value,
-            scoredAt: new Date(),
-            ...(notes !== undefined ? { notes } : {}),
-            ...(startedAt ? { startedAt: new Date(startedAt) } : {}),
-          },
-          create: {
-            feedbackItemId,
-            userId: session.user.id,
-            dimensionId: score.dimensionId,
-            value: score.value,
-            notes: notes || null,
-            startedAt: startedAt ? new Date(startedAt) : null,
-          },
-        })
-      } catch (e: unknown) {
-        // P2002: concurrent request already inserted this row — fall back to update
-        if ((e as { code?: string }).code === 'P2002') {
-          await prisma.score.updateMany({
-            where: {
-              feedbackItemId,
-              userId: session.user.id,
-              dimensionId: score.dimensionId,
-              isReconciled: false,
-            },
-            data: {
-              value: score.value,
-              scoredAt: new Date(),
-              ...(notes !== undefined ? { notes } : {}),
-              ...(startedAt ? { startedAt: new Date(startedAt) } : {}),
-            },
-          })
-        } else {
-          throw e
-        }
-      }
-    }
-  }
-
-  // If only notes changed (no scores), update notes on existing scores
-  if (notes !== undefined && (!scores || scores.length === 0)) {
+  // Notes-only save: apply to the criteria already scored.
+  if (notes !== undefined && scores.length === 0) {
     await prisma.score.updateMany({
       where: {
         feedbackItemId,
@@ -367,9 +267,9 @@ export async function PUT(request: Request) {
     })
   }
 
-  if (releaseId) {
+  if (assignment?.teamReleaseId) {
     try {
-      await maybeAdvanceReleaseAfterScore(releaseId)
+      await maybeAdvanceReleaseAfterScore(assignment.teamReleaseId)
     } catch (err) {
       console.error('Release advancement check failed:', err)
     }

@@ -30,6 +30,7 @@ import {
   Loader2,
   AlertTriangle,
   ArrowLeft,
+  Eye,
   FileText,
 } from 'lucide-react'
 import { AppShell } from '@/components/app-shell'
@@ -46,12 +47,22 @@ import {
 } from '@/lib/optimal-indicator'
 import { QUILL_FEEDBACK_RUBRIC } from '@/lib/rubric-templates'
 import {
+  SAVE_FAILED_MESSAGE,
   ScoreAutosave,
   buildScorePayload,
+  combinePersistResults,
+  persistResultFromResponse,
   scoreSnapshot,
   type AutosaveStatus,
+  type PersistResult,
   type ScoreSavePayload,
 } from '@/lib/score-autosave'
+import {
+  hydrateItemScores,
+  isFullyScored,
+  type HydrationScoreRow,
+  type ItemScoreState,
+} from '@/lib/score-hydration'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -83,25 +94,6 @@ interface ProjectData {
   id: string
   name: string
   rubric: RubricDimension[]
-}
-
-interface DimensionScore {
-  dimensionId: string
-  value: number | null
-}
-
-interface ItemScoreState {
-  scores: DimensionScore[]
-  notes: string
-  startedAt: string | null
-  saved: boolean
-}
-
-interface ExistingScore {
-  feedbackItemId: string
-  dimensionId: string
-  value: number
-  notes: string | null
 }
 
 interface RubricContentBlock {
@@ -160,13 +152,18 @@ export function EvaluateClient({
   userName,
   batchId,
   batchType,
+  readOnly = false,
   reviseDimensionId,
   reviseBatchName,
 }: {
   projectId: string
   userName: string
-  batchId?: string
+  batchId: string
   batchType?: string
+  // The viewer has no open assignment on this batch (an admin previewing):
+  // show the items and criteria, record nothing. The server refuses such
+  // writes anyway; this keeps the screen honest about it.
+  readOnly?: boolean
   // When set, this is the "re-open one criterion" flow: the rubric is filtered
   // to just this dimension and saves are routed through the revise endpoint
   // (which allows editing a closed/reconciling batch). Everything else — the
@@ -202,7 +199,7 @@ export function EvaluateClient({
   // Save status per item, so an item whose save failed after the annotator
   // moved on still reports it when they come back (and in the header).
   const [statusByItem, setStatusByItem] = useState<
-    Record<string, AutosaveStatus>
+    Record<string, { status: AutosaveStatus; message?: string }>
   >({})
 
   // Timing
@@ -213,18 +210,34 @@ export function EvaluateClient({
   // outside React's effect lifecycle so navigating away cannot cancel a
   // pending save, and it re-sends anything changed while a request is out.
   const persistRef = useRef<
-    (payload: { feedbackItemId: string } & ScoreSavePayload) => Promise<boolean>
-  >(async () => false)
+    (payload: { feedbackItemId: string } & ScoreSavePayload) => Promise<PersistResult>
+  >(async () => ({ ok: false, message: SAVE_FAILED_MESSAGE, terminal: false }))
   const [autosave] = useState(
     () =>
       new ScoreAutosave<ScoreSavePayload>({
         debounceMs: 1000,
         persist: (itemId, payload) =>
           persistRef.current({ feedbackItemId: itemId, ...payload }),
-        onStatus: (itemId, status) =>
-          setStatusByItem((prev) =>
-            prev[itemId] === status ? prev : { ...prev, [itemId]: status }
-          ),
+        onStatus: (itemId, status, message) => {
+          setStatusByItem((prev) => {
+            const current = prev[itemId]
+            if (current?.status === status && current?.message === message) {
+              return prev
+            }
+            return { ...prev, [itemId]: { status, message } }
+          })
+          // The server now holds everything for this item. If that is a value
+          // for every criterion, the item is scored — however the annotator
+          // left it (arrows, numbered circles, closing the tab), not only via
+          // Continue. Nav, progress and the completion screen all read `saved`.
+          if (status === 'saved') {
+            setItemScores((prev) => {
+              const state = prev[itemId]
+              if (!state || state.saved || !isFullyScored(state)) return prev
+              return { ...prev, [itemId]: { ...state, saved: true } }
+            })
+          }
+        },
       })
   )
 
@@ -237,13 +250,9 @@ export function EvaluateClient({
       setLoading(true)
       setError(null)
 
-      const itemsUrl = batchId
-        ? `/api/feedback-items?projectId=${projectId}&batchId=${batchId}`
-        : `/api/feedback-items?projectId=${projectId}`
-
       const [projectRes, itemsRes, teamRes] = await Promise.all([
         fetch(`/api/projects/${projectId}`),
-        fetch(itemsUrl),
+        fetch(`/api/feedback-items?projectId=${projectId}&batchId=${batchId}`),
         fetch(`/api/my-team?projectId=${projectId}`),
       ])
 
@@ -300,55 +309,24 @@ export function EvaluateClient({
         return a.id.localeCompare(b.id)
       })
 
-      setProject(projectData)
-      setItems(itemsData)
-
-      // Initialize score state for each item
-      const initialScores: Record<string, ItemScoreState> = {}
-      for (const item of itemsData) {
-        initialScores[item.id] = {
-          scores: projectData.rubric.map((dim) => ({
-            dimensionId: dim.id,
-            value: null,
-          })),
-          notes: '',
-          startedAt: null,
-          saved: false,
-        }
-      }
-
-      // Load any existing scores from the server (flat array of Score records)
+      // Hydrate from the raw scores the server holds for this annotator on
+      // this batch. The route returns raw rows only and hydrateItemScores
+      // ignores a reconciled row regardless, so a pair's final can never show
+      // up (or be re-saved) as the annotator's own score.
+      let existingScores: HydrationScoreRow[] = []
       try {
         const existingRes = await fetch(
-          `/api/scores?projectId=${projectId}`
+          `/api/scores?projectId=${projectId}&batchId=${batchId}`
         )
-        if (existingRes.ok) {
-          const existingScores: ExistingScore[] = await existingRes.json()
-
-          for (const existing of existingScores) {
-            const state = initialScores[existing.feedbackItemId]
-            if (!state) continue
-            const dimScore = state.scores.find(
-              (s) => s.dimensionId === existing.dimensionId
-            )
-            if (dimScore) {
-              dimScore.value = existing.value
-            }
-            if (existing.notes && !state.notes) {
-              state.notes = existing.notes
-            }
-          }
-
-          // Mark items as saved if all dimensions have values
-          for (const state of Object.values(initialScores)) {
-            if (state.scores.every((s) => s.value !== null)) {
-              state.saved = true
-            }
-          }
-        }
+        if (existingRes.ok) existingScores = await existingRes.json()
       } catch {
         // Non-critical — just means we start fresh
       }
+      const initialScores = hydrateItemScores(
+        itemsData.map((item) => item.id),
+        projectData.rubric,
+        existingScores
+      )
 
       // Tell the scheduler what the server already holds, so merely opening
       // an already-scored item does not re-send it (which would also re-stamp
@@ -360,6 +338,10 @@ export function EvaluateClient({
         }
       }
 
+      // Items and their scores must land in the same render: arriving at the
+      // first item reads its saved state once, so it has to be there already.
+      setProject(projectData)
+      setItems(itemsData)
       setItemScores(initialScores)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load data')
@@ -373,19 +355,32 @@ export function EvaluateClient({
   }, [fetchData])
 
   // ---------------------------------------------------------------------------
-  // Reset interaction timer when navigating items
-  // ---------------------------------------------------------------------------
-
-  useEffect(() => {
-    interactedRef.current = false
-  }, [currentIndex])
-
-  // ---------------------------------------------------------------------------
   // Derived state
   // ---------------------------------------------------------------------------
 
   const currentItem = items[currentIndex] ?? null
   const currentScoreState = currentItem ? itemScores[currentItem.id] : null
+
+  // ---------------------------------------------------------------------------
+  // Arriving at an item
+  // ---------------------------------------------------------------------------
+
+  // Whether the item was already complete when the annotator arrived at it.
+  // Drives the button label: "Continue" on a first pass (even once auto-save
+  // has caught up with the last criterion), "Update & Continue" when revisiting
+  // a scored item. Read through a ref so arriving — not every score change —
+  // is what sets it.
+  const itemScoresRef = useRef(itemScores)
+  useEffect(() => {
+    itemScoresRef.current = itemScores
+  }, [itemScores])
+  const [savedOnArrival, setSavedOnArrival] = useState(false)
+  useEffect(() => {
+    interactedRef.current = false
+    setSavedOnArrival(
+      currentItem ? (itemScoresRef.current[currentItem.id]?.saved ?? false) : false
+    )
+  }, [currentItem])
   const scoredCount = Object.values(itemScores).filter((s) => s.saved).length
   const totalCount = items.length
   const allComplete = totalCount > 0 && scoredCount === totalCount
@@ -397,7 +392,8 @@ export function EvaluateClient({
   // Persist one item's scores. In revise mode, saves go to the revise endpoint
   // (which allows editing a closed/reconciling batch and only re-derives
   // reconciliation when a value actually changed); otherwise the normal
-  // /api/scores upsert. Returns true on success.
+  // /api/scores upsert. The result carries the server's reason on failure and
+  // whether retrying could help (a 403/404/423 cannot be fixed by resending).
   //
   // `keepalive` lets a request flushed on beforeunload finish even if the
   // annotator confirms leaving; a plain fetch is cancelled with the page.
@@ -407,8 +403,8 @@ export function EvaluateClient({
       scores: { dimensionId: string; value: number }[]
       notes?: string
       startedAt?: string
-    }): Promise<boolean> => {
-      if (reviseDimensionId && batchId) {
+    }): Promise<PersistResult> => {
+      if (reviseDimensionId) {
         const results = await Promise.all(
           payload.scores.map((s) =>
             fetch(`/api/projects/${projectId}/batches/${batchId}/revise`, {
@@ -421,10 +417,10 @@ export function EvaluateClient({
                 value: s.value,
                 notes: payload.notes,
               }),
-            }).then((r) => r.ok)
+            }).then(persistResultFromResponse)
           )
         )
-        return results.every(Boolean)
+        return combinePersistResults(results)
       }
       const res = await fetch('/api/scores', {
         method: 'PUT',
@@ -437,7 +433,7 @@ export function EvaluateClient({
           startedAt: payload.startedAt,
         }),
       })
-      return res.ok
+      return persistResultFromResponse(res)
     },
     [reviseDimensionId, batchId, projectId]
   )
@@ -451,7 +447,7 @@ export function EvaluateClient({
   // ---------------------------------------------------------------------------
 
   useEffect(() => {
-    if (!currentItem || !currentScoreState) return
+    if (readOnly || !currentItem || !currentScoreState) return
     // A save carries only scored criteria; with none there is nothing to send.
     if (!currentScoreState.scores.some((s) => s.value !== null)) return
     autosave.update(
@@ -459,14 +455,15 @@ export function EvaluateClient({
       buildScorePayload(currentScoreState),
       scoreSnapshot(currentScoreState)
     )
-  }, [currentItem, currentScoreState, autosave])
+  }, [readOnly, currentItem, currentScoreState, autosave])
 
-  // Reload / tab close while something is unsaved: send it now (the keepalive
-  // request completes even if they leave) and ask the browser to warn.
+  // Reload / tab close while something is unsaved: send every dirty item now,
+  // concurrently (the serialized queue would only get its first keepalive
+  // request out before the page is gone) and ask the browser to warn.
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
       if (!autosave.isDirty()) return
-      void autosave.flushAll()
+      void autosave.flushAllNow()
       event.preventDefault()
       // Chrome/Edge < 119 only show the prompt when returnValue is set.
       event.returnValue = true
@@ -484,11 +481,11 @@ export function EvaluateClient({
     }
   }, [autosave])
 
-  const saveStatus: AutosaveStatus = currentItem
-    ? (statusByItem[currentItem.id] ?? 'idle')
-    : 'idle'
+  const currentStatus = currentItem ? statusByItem[currentItem.id] : undefined
+  const saveStatus: AutosaveStatus = currentStatus?.status ?? 'idle'
+  const saveMessage = currentStatus?.message
   const failedIndexes = items.flatMap((item, i) =>
-    statusByItem[item.id] === 'error' ? [i] : []
+    statusByItem[item.id]?.status === 'error' ? [i] : []
   )
 
   // ---------------------------------------------------------------------------
@@ -507,7 +504,9 @@ export function EvaluateClient({
   async function handleBackToDashboard() {
     setLeaving(true)
     const ok = await autosave.flushAll()
-    if (ok) {
+    // Leave when everything persisted, or when what failed can never persist
+    // (the server rejected it for good, so there is nothing left to retry).
+    if (ok || !autosave.isDirty()) {
       router.push('/')
       return
     }
@@ -522,7 +521,7 @@ export function EvaluateClient({
   // ---------------------------------------------------------------------------
 
   function handleScoreChange(dimensionId: string, value: number) {
-    if (!currentItem) return
+    if (readOnly || !currentItem) return
 
     // Mark first interaction time
     if (!interactedRef.current) {
@@ -549,7 +548,7 @@ export function EvaluateClient({
   }
 
   function handleNotesChange(notes: string) {
-    if (!currentItem) return
+    if (readOnly || !currentItem) return
     setItemScores((prev) => ({
       ...prev,
       [currentItem.id]: {
@@ -564,7 +563,9 @@ export function EvaluateClient({
   // ---------------------------------------------------------------------------
 
   async function handleContinue() {
-    if (!currentItem || !currentScoreState || !allDimensionsScored) return
+    if (readOnly || !currentItem || !currentScoreState || !allDimensionsScored) {
+      return
+    }
 
     setSaving(true)
     try {
@@ -679,7 +680,8 @@ export function EvaluateClient({
 
   // Revise mode always lands directly in the scoring UI: every item is already
   // scored, so the "All Items Scored" completion screen would otherwise block it.
-  if (allComplete && !reviewing && !reviseDimensionId) {
+  // A read-only preview has nothing to complete.
+  if (allComplete && !reviewing && !reviseDimensionId && !readOnly) {
     return (
       <AppShell defaultCollapsed>
         <div className="flex min-h-screen items-center justify-center">
@@ -776,6 +778,19 @@ export function EvaluateClient({
             </div>
           )}
 
+          {readOnly && (
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm">
+              <Badge variant="outline">
+                <Eye className="size-3" />
+                Preview — read only
+              </Badge>
+              <span className="text-muted-foreground">
+                You are not assigned to score this batch, so nothing on this
+                screen is recorded.
+              </span>
+            </div>
+          )}
+
           {/* Progress bar */}
           <div className="flex items-center gap-3">
             <span className="text-sm font-medium text-muted-foreground">
@@ -827,7 +842,7 @@ export function EvaluateClient({
                     className={`flex size-7 shrink-0 items-center justify-center rounded-full text-xs font-medium transition-all duration-200 ${
                       entry === currentIndex
                         ? 'bg-nav-current-bg text-nav-current-text ring-2 ring-nav-current-ring'
-                        : statusByItem[items[entry as number]?.id] === 'error'
+                        : statusByItem[items[entry as number]?.id]?.status === 'error'
                           ? 'bg-nav-unscored-bg text-destructive ring-2 ring-destructive/60 hover:opacity-80'
                           : itemScores[items[entry as number]?.id]?.saved
                             ? 'bg-nav-scored-bg text-nav-scored-text'
@@ -925,8 +940,9 @@ export function EvaluateClient({
                 <div className="space-y-1">
                   <CardTitle>Score This Feedback</CardTitle>
                   <CardDescription>
-                    Rate each criterion below. All criteria must be scored
-                    before continuing.
+                    {readOnly
+                      ? 'The criteria annotators score this batch against.'
+                      : 'Rate each criterion below. All criteria must be scored before continuing.'}
                   </CardDescription>
                 </div>
                 <Dialog>
@@ -1078,15 +1094,17 @@ export function EvaluateClient({
                         return (
                           <button
                             key={val}
+                            type="button"
+                            disabled={readOnly}
                             onClick={() => handleScoreChange(dim.id, val)}
-                            className={`rounded-xl border-2 px-4 py-3 text-left text-sm font-medium transition-all duration-200 ${
+                            className={`rounded-xl border-2 px-4 py-3 text-left text-sm font-medium transition-all duration-200 disabled:cursor-not-allowed disabled:opacity-60 ${
                               isSelected
                                 ? getSelectedScoreColor(
                                     val,
                                     dim.scaleMin,
                                     dim.scaleMax
                                   )
-                                : `${getUnselectedOptionColor()} hover:shadow-md`
+                                : `${getUnselectedOptionColor()} ${readOnly ? '' : 'hover:shadow-md'}`
                             }`}
                           >
                             {label && (
@@ -1109,90 +1127,103 @@ export function EvaluateClient({
                 )
               })}
 
-              {/* Notes */}
-              <div className="border-t pt-4">
-                <Label className="text-sm font-semibold text-foreground">
-                  Notes (optional)
-                </Label>
-                <Textarea
-                  placeholder="Any additional notes about this feedback item..."
-                  value={currentScoreState?.notes ?? ''}
-                  onChange={(e) => handleNotesChange(e.target.value)}
-                  className="mt-2 text-sm"
-                  rows={3}
-                />
-              </div>
-
-              {/* Save status + timing indicator */}
-              <div className="flex items-center justify-between text-xs text-muted-foreground">
-                <div className="flex items-center gap-1.5">
-                  {saveStatus === 'saving' && (
-                    <>
-                      <Loader2 className="size-3 animate-spin" />
-                      <span>Saving...</span>
-                    </>
-                  )}
-                  {saveStatus === 'saved' && (
-                    <>
-                      <CheckCircle className="size-3 text-success" />
-                      <span>Saved</span>
-                    </>
-                  )}
-                  {saveStatus === 'error' && (
-                    <>
-                      <AlertTriangle className="size-3 text-destructive" />
-                      <span>Save failed</span>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          currentItem && void autosave.flush(currentItem.id)
-                        }
-                        className="font-medium text-foreground underline underline-offset-2 transition-all duration-200 hover:text-primary"
-                      >
-                        Retry
-                      </button>
-                    </>
-                  )}
-                </div>
-                {currentScoreState?.startedAt && (
-                  <div className="flex items-center gap-1.5">
-                    <Clock className="size-3" />
-                    <span>
-                      Started{' '}
-                      {new Date(
-                        currentScoreState.startedAt
-                      ).toLocaleTimeString()}
-                    </span>
+              {!readOnly && (
+                <>
+                  {/* Notes */}
+                  <div className="border-t pt-4">
+                    <Label className="text-sm font-semibold text-foreground">
+                      Notes (optional)
+                    </Label>
+                    <Textarea
+                      placeholder="Any additional notes about this feedback item..."
+                      value={currentScoreState?.notes ?? ''}
+                      onChange={(e) => handleNotesChange(e.target.value)}
+                      className="mt-2 text-sm"
+                      rows={3}
+                    />
                   </div>
-                )}
-              </div>
 
-              {/* Continue button */}
-              <Button
-                className="w-full"
-                size="lg"
-                disabled={!allDimensionsScored || saving}
-                onClick={handleContinue}
-              >
-                {saving ? (
-                  <>
-                    <Loader2 className="size-4 animate-spin" />
-                    Saving...
-                  </>
-                ) : currentScoreState?.saved ? (
-                  <>
-                    <CheckCircle className="size-4" />
-                    Update & Continue
-                  </>
-                ) : (
-                  'Continue'
-                )}
-              </Button>
+                  {/* Save status + timing indicator */}
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <div className="flex items-center gap-1.5">
+                      {saveStatus === 'saving' && (
+                        <>
+                          <Loader2 className="size-3 animate-spin" />
+                          <span>Saving...</span>
+                        </>
+                      )}
+                      {saveStatus === 'saved' && (
+                        <>
+                          <CheckCircle className="size-3 text-success" />
+                          <span>Saved</span>
+                        </>
+                      )}
+                      {saveStatus === 'error' && (
+                        <>
+                          <AlertTriangle className="size-3 text-destructive" />
+                          <span>{saveMessage ?? SAVE_FAILED_MESSAGE}</span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              currentItem && void autosave.flush(currentItem.id)
+                            }
+                            className="font-medium text-foreground underline underline-offset-2 transition-all duration-200 hover:text-primary"
+                          >
+                            Retry
+                          </button>
+                        </>
+                      )}
+                      {saveStatus === 'rejected' && (
+                        <>
+                          <AlertTriangle className="size-3 text-warning" />
+                          <span>
+                            Not saved
+                            {saveMessage ? ` — ${saveMessage}` : ''}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                    {currentScoreState?.startedAt && (
+                      <div className="flex items-center gap-1.5">
+                        <Clock className="size-3" />
+                        <span>
+                          Started{' '}
+                          {new Date(
+                            currentScoreState.startedAt
+                          ).toLocaleTimeString()}
+                        </span>
+                      </div>
+                    )}
+                  </div>
 
-              {!allDimensionsScored && (
-                <p className="text-center text-xs text-muted-foreground">
-                  Score all {rubric.length} criteria to continue
-                </p>
+                  {/* Continue button */}
+                  <Button
+                    className="w-full"
+                    size="lg"
+                    disabled={!allDimensionsScored || saving}
+                    onClick={handleContinue}
+                  >
+                    {saving ? (
+                      <>
+                        <Loader2 className="size-4 animate-spin" />
+                        Saving...
+                      </>
+                    ) : savedOnArrival ? (
+                      <>
+                        <CheckCircle className="size-4" />
+                        Update & Continue
+                      </>
+                    ) : (
+                      'Continue'
+                    )}
+                  </Button>
+
+                  {!allDimensionsScored && (
+                    <p className="text-center text-xs text-muted-foreground">
+                      Score all {rubric.length} criteria to continue
+                    </p>
+                  )}
+                </>
               )}
             </CardContent>
           </Card>
