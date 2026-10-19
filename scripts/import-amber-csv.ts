@@ -2,8 +2,12 @@ import 'dotenv/config'
 import { PrismaClient } from '../src/generated/prisma/client.js'
 import { PrismaNeon } from '@prisma/adapter-neon'
 import * as XLSX from 'xlsx'
+import { assertNotProduction } from './_guard.js'
 
 async function main() {
+  // Creates (and deletes an empty copy of) a *test* project — never production.
+  await assertNotProduction('import-amber-csv', { neverProduction: true })
+
   const adapter = new PrismaNeon({
     connectionString: process.env.DATABASE_URL!,
   })

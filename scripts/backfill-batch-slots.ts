@@ -2,6 +2,7 @@ import 'dotenv/config'
 import { PrismaClient } from '../src/generated/prisma/client.js'
 import { PrismaNeon } from '@prisma/adapter-neon'
 import { randomInt } from 'crypto'
+import { ALLOW_PROD_FLAG, assertNotProduction, hasAllowProdFlag } from './_guard.js'
 
 const adapter = new PrismaNeon({ connectionString: process.env.DATABASE_URL })
 const prisma = new PrismaClient({ adapter })
@@ -78,6 +79,7 @@ async function syncReleaseAssignments(releaseId: string) {
 
 async function main() {
   const dryRun = !process.argv.includes('--write')
+  const allowProd = hasAllowProdFlag()
 
   const batches = await prisma.batch.findMany({
     where: { type: 'REGULAR', isDoubleScored: false },
@@ -91,6 +93,24 @@ async function main() {
   console.log(
     `Found ${batches.length} non-double-scored regular batches${dryRun ? ' (dry run, pass --write to apply)' : ''}`
   )
+
+  if (!dryRun && batches.length > 0) {
+    await assertNotProduction('backfill-batch-slots', { allowProd })
+    // Slotting reshuffles EVERY item in a batch (not only the unslotted ones)
+    // and rebuilds its batch assignments, so an item that already carries
+    // scores can move to the other annotator. Refuse unless the operator
+    // explicitly accepted that.
+    const scoredCount = await prisma.score.count({
+      where: { feedbackItem: { batchId: { in: batches.map((b) => b.id) } } },
+    })
+    if (scoredCount > 0 && !allowProd) {
+      console.error(
+        `\nRefusing: ${scoredCount} scores exist on these batches; re-randomizing slots would move scored items between annotators. Pass ${ALLOW_PROD_FLAG} to proceed anyway.`
+      )
+      await prisma.$disconnect()
+      process.exit(1)
+    }
+  }
 
   for (const batch of batches) {
     const itemCount = await prisma.feedbackItem.count({

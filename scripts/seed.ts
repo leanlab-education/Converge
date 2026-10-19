@@ -2,12 +2,13 @@ import 'dotenv/config'
 import { PrismaClient } from '../src/generated/prisma/client.js'
 import { PrismaNeon } from '@prisma/adapter-neon'
 import { hash } from 'bcryptjs'
+import { assertNotProduction } from './_guard.js'
 
 async function main() {
-  if (process.env.NODE_ENV === 'production' || process.env.VERCEL_ENV === 'production') {
-    console.error('ERROR: Seed script cannot run against production. Aborting.')
-    process.exit(1)
-  }
+  // Test accounts never belong in production. The guard refuses the known
+  // production host outright and asks for a typed host confirmation on any
+  // other Neon host (preview branches).
+  await assertNotProduction('seed', { neverProduction: true })
 
   const adapter = new PrismaNeon({
     connectionString: process.env.DATABASE_URL!,

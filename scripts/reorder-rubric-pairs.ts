@@ -8,9 +8,10 @@
  * pairing everywhere (annotator view, team creation, export columns), so the
  * fix is a sortOrder update.
  *
- * Usage: doppler run -p writing-evaluator -c dev -- npx tsx scripts/reorder-rubric-pairs.ts <projectId>
+ * Usage: doppler run -p writing-evaluator -c dev -- npx tsx scripts/reorder-rubric-pairs.ts <projectId> [--allow-prod]
  */
 import { prisma } from '../src/lib/db'
+import { assertNotProduction, positionalArgs } from './_guard'
 
 const DESIRED_ORDER = [
   'Manageable',
@@ -24,11 +25,13 @@ const DESIRED_ORDER = [
 ]
 
 async function main() {
-  const projectId = process.argv[2]
+  const [projectId] = positionalArgs()
   if (!projectId) {
-    console.error('Usage: npx tsx scripts/reorder-rubric-pairs.ts <projectId>')
+    console.error('Usage: npx tsx scripts/reorder-rubric-pairs.ts <projectId> [--allow-prod]')
     process.exit(1)
   }
+
+  await assertNotProduction('reorder-rubric-pairs')
 
   const project = await prisma.project.findUnique({
     where: { id: projectId },

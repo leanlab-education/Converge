@@ -2,6 +2,7 @@ import 'dotenv/config'
 import { PrismaClient } from '../src/generated/prisma/client.js'
 import { PrismaNeon } from '@prisma/adapter-neon'
 import { compareFeedbackIds } from '../src/lib/feedback-id.js'
+import { assertNotProduction } from './_guard.js'
 
 /**
  * Generate a realistic mid-flight snapshot for the Test #2 project:
@@ -322,6 +323,10 @@ async function main() {
     await prisma.$disconnect()
     return
   }
+
+  // Writes start here (the dry run above is read-only). Fake scores never
+  // belong in production; preview branches need --allow-prod + confirmation.
+  await assertNotProduction('seed-realistic-scoring', { neverProduction: true })
 
   console.log('\nWiping existing batches/scores in project…')
   await prisma.batch.deleteMany({ where: { projectId: project.id } })

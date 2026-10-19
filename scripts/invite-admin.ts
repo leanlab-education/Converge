@@ -1,16 +1,20 @@
 import { PrismaClient } from '../src/generated/prisma/client.js'
 import { PrismaNeon } from '@prisma/adapter-neon'
 import { randomBytes } from 'crypto'
+import { assertNotProduction, positionalArgs } from './_guard.js'
 
-const email = process.argv[2]
-const name = process.argv[3] || null
+const [email, name = null] = positionalArgs()
 
 if (!email) {
-  console.error('Usage: npx tsx scripts/invite-admin.ts <email> [name]')
+  console.error('Usage: npx tsx scripts/invite-admin.ts <email> [name] [--allow-prod]')
   process.exit(1)
 }
 
 async function main() {
+  // Inviting a global admin to production is a legitimate use — but only on
+  // purpose: --allow-prod plus typing the host name back.
+  await assertNotProduction('invite-admin')
+
   const adapter = new PrismaNeon({ connectionString: process.env.DATABASE_URL! })
   const prisma = new PrismaClient({ adapter })
 
