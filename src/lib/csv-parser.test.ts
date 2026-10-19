@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { parseCSV, validateCSVRow, type FeedbackCSVRow } from '@/lib/csv-parser'
+import {
+  findDuplicateFeedbackIds,
+  normalizeFeedbackSource,
+  parseCSV,
+  validateCSVRow,
+  type FeedbackCSVRow,
+} from '@/lib/csv-parser'
 
 const HEADER =
   'Response_ID,Student_ID,Cycle_ID,Activity_ID,Conjunction_ID,Student_Text,Feedback_Source,Teacher_ID,Feedback_Text,optimal,feedback_type,Feedback_ID'
@@ -82,7 +88,71 @@ describe('validateCSVRow', () => {
     expect(validateCSVRow({ ...valid, Feedback_Source: 'robot' }, 0)).toMatch(/must be "AI" or "HUMAN"/)
   })
 
+  // Feedback_Source is the blinded column the export later reveals as fact. A
+  // blank used to pass validation and the client defaulted it to AI, so a whole
+  // file could be mislabeled without a single error.
+  it('rejects a blank Feedback_Source instead of letting it default to AI', () => {
+    expect(validateCSVRow({ ...valid, Feedback_Source: '' }, 0)).toMatch(/missing Feedback_Source/)
+    expect(validateCSVRow({ ...valid, Feedback_Source: '   ' }, 0)).toMatch(/Feedback_Source/)
+  })
+
+  it('rejects every row when the source column header is misspelled', () => {
+    // "Feedback_Src" is not in the alias table, so Feedback_Source is never set.
+    const header =
+      'Response_ID,Student_ID,Cycle_ID,Activity_ID,Conjunction_ID,Student_Text,Feedback_Src,Teacher_ID,Feedback_Text,optimal,feedback_type,Feedback_ID'
+    const rows = parseCSV(`${header}\nR1,S1,C1,A1,because,resp,AI,T1,fb,1,x,F1\nR2,S2,C1,A1,because,resp,HUMAN,T1,fb,1,x,F2`)
+    expect(rows).toHaveLength(2)
+    const errors = rows.map((row, i) => validateCSVRow(row, i))
+    expect(errors[0]).toMatch(/Row 1: missing Feedback_Source/)
+    expect(errors[1]).toMatch(/Row 2: missing Feedback_Source/)
+  })
+
+  it('accepts a correctly labeled file with no errors', () => {
+    const rows = parseCSV(
+      `${HEADER}\nR1,S1,C1,A1,because,resp,AI,T1,fb,1,x,F1\nR2,S2,C1,A1,because,resp,human,T1,fb,1,x,F2`
+    )
+    expect(rows.map((row, i) => validateCSVRow(row, i))).toEqual([null, null])
+  })
+
   it('uses 1-based row numbers in messages', () => {
     expect(validateCSVRow({ ...valid, Student_ID: '' }, 4)).toMatch(/Row 5:/)
+  })
+})
+
+describe('normalizeFeedbackSource', () => {
+  it('accepts AI/HUMAN in any case, trimmed', () => {
+    expect(normalizeFeedbackSource('AI')).toBe('AI')
+    expect(normalizeFeedbackSource(' human ')).toBe('HUMAN')
+  })
+
+  it('returns null for blank, unknown, or non-string values', () => {
+    expect(normalizeFeedbackSource('')).toBeNull()
+    expect(normalizeFeedbackSource('robot')).toBeNull()
+    expect(normalizeFeedbackSource(undefined)).toBeNull()
+    expect(normalizeFeedbackSource(1)).toBeNull()
+  })
+})
+
+describe('findDuplicateFeedbackIds', () => {
+  it('returns nothing for a file with unique ids', () => {
+    expect(findDuplicateFeedbackIds([{ Feedback_ID: 'F1' }, { Feedback_ID: 'F2' }])).toEqual([])
+  })
+
+  it('names each duplicated id with every row it appears on', () => {
+    const errors = findDuplicateFeedbackIds([
+      { Feedback_ID: 'F1' },
+      { Feedback_ID: 'F2' },
+      { Feedback_ID: 'F1' },
+      { Feedback_ID: 'F2' },
+      { Feedback_ID: 'F1' },
+    ])
+    expect(errors).toEqual([
+      'Feedback_ID "F1" appears 3 times (rows 1, 3, 5)',
+      'Feedback_ID "F2" appears 2 times (rows 2, 4)',
+    ])
+  })
+
+  it('ignores blank ids (validateCSVRow reports those)', () => {
+    expect(findDuplicateFeedbackIds([{ Feedback_ID: '' }, { Feedback_ID: '' }])).toEqual([])
   })
 })
