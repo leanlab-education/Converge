@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
-import { Loader2, Gavel, CheckCircle, AlertTriangle } from 'lucide-react'
+import { Loader2, Gavel, CheckCircle, AlertTriangle, RefreshCw } from 'lucide-react'
 import { AppShell } from '@/components/app-shell'
 import { getScaleOptions, getScoreColor, getSelectedScoreColor, getUnselectedOptionColor } from '@/lib/scoring-utils'
 import {
@@ -78,50 +78,90 @@ function parseScoreLabels(
   }
 }
 
+async function readErrorMessage(res: Response, fallback: string): Promise<string> {
+  try {
+    const body = (await res.json()) as { error?: string }
+    return body.error || fallback
+  } catch {
+    return fallback
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
 export function AdjudicateClient({ userName }: { userName: string }) {
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
   const [items, setItems] = useState<EscalationItem[]>([])
   const [selections, setSelections] = useState<
     Record<string, { value: number | null; notes: string }>
   >({})
-  const [savingId, setSavingId] = useState<string | null>(null)
+  // One in-flight resolve per card. A single id would let a click on card B
+  // re-enable card A mid-flight, and A's completion would clear B's spinner;
+  // a double submit then reaches the server and the second 400 strands the card.
+  const [savingIds, setSavingIds] = useState<Set<string>>(() => new Set())
+  // Per-card failure, shown inline under that card's Resolve button.
+  const [resolveErrors, setResolveErrors] = useState<Record<string, string>>({})
 
-  const fetchQueue = useCallback(async () => {
-    setLoading(true)
+  // `initial` drives the full-page spinner; a refetch after a resolve error
+  // keeps the queue on screen and only shows a small refreshing indicator.
+  const fetchQueue = useCallback(async (initial: boolean) => {
+    if (initial) setLoading(true)
+    else setRefreshing(true)
+    setLoadError(null)
     try {
       const res = await fetch('/api/adjudicate')
-      if (!res.ok) throw new Error('Failed to load queue')
+      if (!res.ok) {
+        throw new Error(await readErrorMessage(res, 'Failed to load the adjudicator queue'))
+      }
       const data = await res.json()
-      setItems(data.items || [])
-      // Initialize selection state
+      const nextItems: EscalationItem[] = data.items || []
+      setItems(nextItems)
+      // Keep selections for cards still in the queue; drop the rest.
       setSelections((prev) => {
-        const next = { ...prev }
-        for (const it of data.items || []) {
-          if (!next[it.escalationId]) {
-            next[it.escalationId] = { value: null, notes: '' }
-          }
+        const next: typeof prev = {}
+        for (const it of nextItems) {
+          next[it.escalationId] = prev[it.escalationId] ?? { value: null, notes: '' }
         }
         return next
       })
     } catch (err) {
       console.error('Failed to load adjudicator queue:', err)
+      setLoadError(
+        err instanceof Error ? err.message : 'Failed to load the adjudicator queue'
+      )
     } finally {
       setLoading(false)
+      setRefreshing(false)
     }
   }, [])
 
   useEffect(() => {
-    fetchQueue()
+    fetchQueue(true)
   }, [fetchQueue])
+
+  function setSaving(escalationId: string, on: boolean) {
+    setSavingIds((prev) => {
+      const next = new Set(prev)
+      if (on) next.add(escalationId)
+      else next.delete(escalationId)
+      return next
+    })
+  }
 
   async function handleResolve(escalationId: string) {
     const sel = selections[escalationId]
     if (!sel || sel.value == null) return
-    setSavingId(escalationId)
+    if (savingIds.has(escalationId)) return
+    setSaving(escalationId, true)
+    setResolveErrors((prev) => {
+      const next = { ...prev }
+      delete next[escalationId]
+      return next
+    })
     try {
       const res = await fetch('/api/adjudicate', {
         method: 'POST',
@@ -137,8 +177,13 @@ export function AdjudicateClient({ userName }: { userName: string }) {
         }),
       })
       if (!res.ok) {
-        const err = await res.json()
-        alert(err.error || 'Failed to resolve escalation')
+        const message = await readErrorMessage(res, 'Failed to resolve escalation')
+        setResolveErrors((prev) => ({ ...prev, [escalationId]: message }))
+        // 400 = already resolved/withdrawn, 409 = changed underneath us: the
+        // queue on screen is stale, so re-sync it rather than leave a dead card.
+        if (res.status === 400 || res.status === 409) {
+          await fetchQueue(false)
+        }
         return
       }
       // Remove the resolved item from the queue without a full refetch
@@ -148,8 +193,15 @@ export function AdjudicateClient({ userName }: { userName: string }) {
         delete next[escalationId]
         return next
       })
+    } catch (err) {
+      console.error('Resolve failed:', err)
+      setResolveErrors((prev) => ({
+        ...prev,
+        [escalationId]:
+          'Could not reach the server. Check your connection and try again.',
+      }))
     } finally {
-      setSavingId(null)
+      setSaving(escalationId, false)
     }
   }
 
@@ -163,19 +215,55 @@ export function AdjudicateClient({ userName }: { userName: string }) {
     )
   }
 
+  if (loadError) {
+    return (
+      <AppShell>
+        <div className="mx-auto max-w-5xl px-4 py-10 sm:px-6 lg:px-8">
+          <Card className="max-w-md">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-destructive">
+                <AlertTriangle className="size-5" />
+                Couldn&apos;t load the adjudicator queue
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="text-sm text-muted-foreground">{loadError}</p>
+              <Button
+                className="mt-4"
+                variant="outline"
+                onClick={() => fetchQueue(true)}
+              >
+                <RefreshCw className="mr-1 size-4" />
+                Retry
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
+      </AppShell>
+    )
+  }
+
   return (
     <AppShell>
       <div className="mx-auto max-w-5xl px-4 py-10 sm:px-6 lg:px-8">
-        <div className="mb-6 flex items-center gap-3">
-          <Gavel className="size-6 text-primary" />
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">
-              Adjudicator Queue
-            </h1>
-            <p className="text-sm text-muted-foreground">
-              {userName}, resolve items the reconciling pair couldn&apos;t agree on.
-            </p>
+        <div className="mb-6 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <Gavel className="size-6 text-primary" />
+            <div>
+              <h1 className="text-2xl font-bold tracking-tight">
+                Adjudicator Queue
+              </h1>
+              <p className="text-sm text-muted-foreground">
+                {userName}, resolve items the reconciling pair couldn&apos;t agree on.
+              </p>
+            </div>
           </div>
+          {refreshing && (
+            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Loader2 className="size-3 animate-spin" />
+              Refreshing…
+            </span>
+          )}
         </div>
 
         {items.length === 0 ? (
@@ -202,7 +290,8 @@ export function AdjudicateClient({ userName }: { userName: string }) {
                 item.dimension.scaleMin,
                 item.dimension.scaleMax
               )
-              const isSaving = savingId === item.escalationId
+              const isSaving = savingIds.has(item.escalationId)
+              const resolveError = resolveErrors[item.escalationId]
 
               return (
                 <Card key={item.escalationId}>
@@ -335,6 +424,7 @@ export function AdjudicateClient({ userName }: { userName: string }) {
                           return (
                             <button
                               key={val}
+                              disabled={isSaving}
                               onClick={() =>
                                 setSelections((prev) => ({
                                   ...prev,
@@ -346,7 +436,7 @@ export function AdjudicateClient({ userName }: { userName: string }) {
                                   },
                                 }))
                               }
-                              className={`rounded-xl border-2 px-4 py-3 text-left text-sm font-medium transition-all duration-200 ${
+                              className={`rounded-xl border-2 px-4 py-3 text-left text-sm font-medium transition-all duration-200 disabled:cursor-not-allowed disabled:opacity-50 ${
                                 isSelected
                                   ? getSelectedScoreColor(
                                       val,
@@ -374,6 +464,7 @@ export function AdjudicateClient({ userName }: { userName: string }) {
                       </Label>
                       <Textarea
                         value={sel.notes}
+                        disabled={isSaving}
                         onChange={(e) =>
                           setSelections((prev) => ({
                             ...prev,
@@ -389,7 +480,18 @@ export function AdjudicateClient({ userName }: { userName: string }) {
                       />
                     </div>
 
-                    <div className="flex justify-end">
+                    <div className="flex items-center justify-between gap-3">
+                      {resolveError ? (
+                        <p
+                          role="alert"
+                          className="flex items-center gap-1.5 text-xs text-destructive"
+                        >
+                          <AlertTriangle className="size-3 shrink-0" />
+                          {resolveError}
+                        </p>
+                      ) : (
+                        <span />
+                      )}
                       <Button
                         disabled={sel.value == null || isSaving}
                         onClick={() => handleResolve(item.escalationId)}
@@ -402,7 +504,7 @@ export function AdjudicateClient({ userName }: { userName: string }) {
                         ) : (
                           <>
                             <Gavel className="mr-2 size-4" />
-                            Resolve
+                            {resolveError ? 'Retry' : 'Resolve'}
                           </>
                         )}
                       </Button>

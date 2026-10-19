@@ -230,7 +230,7 @@ export default async function ProjectPage({
       },
     },
     select: {
-      dimension: { select: { label: true } },
+      dimension: { select: { id: true, label: true } },
       teamRelease: {
         select: {
           batchId: true,
@@ -242,6 +242,7 @@ export default async function ProjectPage({
   const reviseTasks = reviseUnlocks.map((u) => ({
     batchId: u.teamRelease.batchId,
     batchName: u.teamRelease.batch.name,
+    dimensionId: u.dimension.id,
     criterionLabel: u.dimension.label,
     isLocked: u.teamRelease.batch.isLocked,
   }))

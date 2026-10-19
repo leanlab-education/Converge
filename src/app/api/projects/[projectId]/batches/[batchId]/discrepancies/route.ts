@@ -416,7 +416,11 @@ export async function GET(
     items,
     hasAdjudicator,
     isLocked: release.batch.isLocked,
+    // The client branches its end-of-list screen on these two server facts —
+    // never on a count it derives locally. A release stays RECONCILING while
+    // any escalation is open, even when the pair has nothing left to record.
     releaseStatus: release.status,
+    openEscalationCount: openEscalations.length,
     reconciledScores: existingReconciledScores,
     summary: {
       totalItems: itemMap.size,
