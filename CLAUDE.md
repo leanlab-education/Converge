@@ -165,7 +165,11 @@ On a discrepancy, recording your **own** original value as the final means the p
 
 ### Test Accounts
 
-There is no separate dev database (see **One database for every environment** above), so **`scripts/seed.ts` must not be run**: it would create a global admin with a published password in the production database. The accounts it creates (`admin@leanlab.org`, `evaluator@test.com`) were found live in production on 2026-10-19 and must stay deleted or rotated. For manual testing, use your own account on the "Evaluation Testing 2" project, or a Neon branch.
+There is no separate dev database (see **One database for every environment** above), so **`scripts/seed.ts` must not be run**: it would create a global admin with a published password in the production database (it did, on 2026-03-25; found on 2026-10-19).
+
+- `admin@leanlab.org` (global ADMIN) must stay disabled: no password, no admin role.
+- `evaluator@test.com` is the manual-test annotator on the disposable "Evaluation Testing 2" project. Its password lives in the team password manager, **never in this repo**. Score only there; never add it to a real study.
+- For anything that mutates real data, use a Neon branch.
 
 ## Project Structure
 
