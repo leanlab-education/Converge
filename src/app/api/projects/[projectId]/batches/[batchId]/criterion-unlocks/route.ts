@@ -2,9 +2,11 @@ import { auth } from '@/lib/auth'
 import { canAdminProject } from '@/lib/authorization'
 import { prisma } from '@/lib/db'
 import { maybeCompleteReleaseReconciliation } from '@/lib/reconciliation'
+import { isReconcilableStatus } from '@/lib/reconciliation-access'
 import {
   getExpectedReleaseUserIds,
   releaseNeedsReconciliation,
+  syncBatchStatus,
 } from '@/lib/team-batch-releases'
 import { NextRequest, NextResponse } from 'next/server'
 
@@ -118,6 +120,20 @@ export async function POST(
       { status: 423 }
     )
   }
+  // Re-opening only makes sense once this team's scoring is over (RECONCILING
+  // or COMPLETE). While the release is SCORING the annotators can still change
+  // their scores directly, and an unlock there would let a revision re-derive
+  // reconciliation on a half-scored release — the scores route only accepts
+  // writes while SCORING, so a promotion to RECONCILING would 403 the partner's
+  // remaining items. A DRAFT release has nothing to revise.
+  if (!isReconcilableStatus(release.status)) {
+    return NextResponse.json(
+      {
+        error: `A criterion can only be re-opened after this team has finished scoring the batch (the release is still ${release.status}). Until then annotators can change their scores directly.`,
+      },
+      { status: 400 }
+    )
+  }
   // Only criteria the team actually scores can be re-opened.
   const teamDimensionIds = new Set(release.team.dimensions.map((d) => d.dimensionId))
   if (!teamDimensionIds.has(dimensionId)) {
@@ -156,11 +172,14 @@ export async function POST(
   // pair revises. (COMPLETE releases are otherwise settled.) Idempotent.
   // Independent (non-double-scored) releases never reconcile — there is no hub to
   // reach and no discrepancy to re-settle — so they stay COMPLETE while open.
+  // The batch must follow: a COMPLETE batch with a RECONCILING release would be
+  // exported as finalized for the whole revision window.
   if (release.status === 'COMPLETE' && releaseNeedsReconciliation(release)) {
     await prisma.teamBatchRelease.update({
       where: { id: releaseId },
       data: { status: 'RECONCILING' },
     })
+    await syncBatchStatus(release.batchId)
   }
 
   return NextResponse.json({ opened: true, unlock }, { status: 201 })
@@ -201,8 +220,12 @@ export async function DELETE(
   })
 
   // Settle the release now that revisions are closed — completes it if every
-  // discrepancy is resolved.
-  await maybeCompleteReleaseReconciliation(releaseId)
+  // discrepancy is resolved. Completion syncs the batch itself; otherwise
+  // re-derive the batch here so it can't disagree with the release.
+  const completed = await maybeCompleteReleaseReconciliation(releaseId)
+  if (!completed) {
+    await syncBatchStatus(release.batchId)
+  }
 
   return NextResponse.json({ closed: true })
 }
