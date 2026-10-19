@@ -82,6 +82,9 @@ interface AdjudicateTask {
 interface ReviseTask {
   batchId: string
   batchName: string
+  // Which re-opened criterion this card edits. Carried in the /revise URL so
+  // two re-opened criteria on one release each open their own editor.
+  dimensionId: string
   criterionLabel: string
   isLocked: boolean
 }
@@ -177,7 +180,7 @@ export function EvaluatorProjectPage({
               <div className="mb-5 space-y-3">
                 {reviseTasks.map((task) => (
                   <Card
-                    key={`${task.batchId}-${task.criterionLabel}`}
+                    key={`${task.batchId}-${task.dimensionId}`}
                     className="border-warning/30 bg-warning/5 transition-all duration-200 hover:shadow-sm"
                   >
                     <CardHeader className="pb-2">
@@ -204,7 +207,9 @@ export function EvaluatorProjectPage({
                           size="sm"
                           disabled={task.isLocked}
                           onClick={() =>
-                            router.push(`/revise/${project.id}?batchId=${task.batchId}`)
+                            router.push(
+                              `/revise/${project.id}?batchId=${task.batchId}&dimensionId=${task.dimensionId}`
+                            )
                           }
                         >
                           {task.isLocked ? 'Locked' : `Revise ${task.criterionLabel}`}

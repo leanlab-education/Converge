@@ -9,10 +9,24 @@ import {
   getReleaseOwnerUserId,
   releaseNeedsReconciliation,
 } from '@/lib/team-batch-releases'
+import {
+  isStaleFinal,
+  isValidExpectedFinal,
+  StaleFinalError,
+} from '@/lib/reconcile-write-guard'
 import { NextRequest, NextResponse } from 'next/server'
 
 // POST /api/projects/[projectId]/batches/[batchId]/reconcile
 // Accepts reconciled scores for one team release.
+//
+// Each score may carry `expectedFinal`: the final value the client last saw
+// for that (item, dimension) — null when it saw none. The save is refused
+// (409) when the server's current final differs, so a sequential stale write
+// (partner A saved 2; B's screen still showed the cell unsaved; B saves 3)
+// cannot silently replace A's decision and re-attribute `reconciledById` to B.
+// The serializable transaction only catches physically overlapping writes;
+// this compare-and-set catches the sequential case. Omitting `expectedFinal`
+// skips the check (last write wins), which no current client does.
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ projectId: string; batchId: string }> }
@@ -28,7 +42,7 @@ export async function POST(
     releaseId?: string
     items: {
       feedbackItemId: string
-      scores: { dimensionId: string; value: number }[]
+      scores: { dimensionId: string; value: number; expectedFinal?: number | null }[]
       notes?: string
     }[]
   }
@@ -182,6 +196,12 @@ export async function POST(
           { status: 400 }
         )
       }
+      if (!isValidExpectedFinal(score.expectedFinal)) {
+        return NextResponse.json(
+          { error: 'expectedFinal must be a number or null' },
+          { status: 400 }
+        )
+      }
     }
   }
 
@@ -247,10 +267,14 @@ export async function POST(
               },
               select: { value: true },
             })
-            writeContext.set(key, {
-              originals,
-              existingFinalValue: existingFinal?.value ?? null,
-            })
+            const existingFinalValue = existingFinal?.value ?? null
+            // Compare-and-set against the final the client last saw. A
+            // mismatch means someone recorded this cell since the client
+            // loaded it; abort before any write so the whole save rolls back.
+            if (isStaleFinal(score.expectedFinal, existingFinalValue)) {
+              throw new StaleFinalError()
+            }
+            writeContext.set(key, { originals, existingFinalValue })
           }
         }
 
@@ -305,6 +329,9 @@ export async function POST(
       { isolationLevel: 'Serializable' }
     )
   } catch (err) {
+    if (err instanceof StaleFinalError) {
+      return NextResponse.json({ error: err.message }, { status: 409 })
+    }
     if (
       err instanceof Prisma.PrismaClientKnownRequestError &&
       err.code === 'P2034'
@@ -322,5 +349,23 @@ export async function POST(
 
   await maybeCompleteReleaseReconciliation(releaseId)
 
-  return NextResponse.json({ saved: true, reconciledCount })
+  // Hand the client the server's view after this save so its end-of-list
+  // screen reflects whether the release actually completed, rather than
+  // inferring it from what it has saved locally.
+  const [after, openEscalationCount] = await Promise.all([
+    prisma.teamBatchRelease.findUnique({
+      where: { id: releaseId },
+      select: { status: true },
+    }),
+    prisma.escalation.count({
+      where: { teamReleaseId: releaseId, resolvedAt: null },
+    }),
+  ])
+
+  return NextResponse.json({
+    saved: true,
+    reconciledCount,
+    releaseStatus: after?.status ?? release.status,
+    openEscalationCount,
+  })
 }
