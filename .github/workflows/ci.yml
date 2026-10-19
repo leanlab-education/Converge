@@ -3,17 +3,26 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
 
 # Cancel superseded runs on the same ref.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   test:
     name: Typecheck · Lint · Test
     runs-on: ubuntu-latest
+    # The default job timeout is 6 hours; a hung install or test must not
+    # burn the shared Actions quota.
+    timeout-minutes: 15
     env:
       # Unit tests never connect — a dummy URL lets modules that import
       # @/lib/db construct the Prisma client, and lets `prisma generate` run.

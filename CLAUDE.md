@@ -59,8 +59,16 @@ doppler run -p writing-evaluator -c dev -- <command>
 - **DB name**: `neondb`, **User**: `neondb_owner`
 - **Connection string**: In `.env` (gitignored)
 - **Prisma schema**: `prisma/schema.prisma`
-- **Prisma config**: `prisma/prisma.config.ts` (required for Prisma v7 — datasource URL configured here, not in schema)
+- **Prisma config**: `prisma.config.ts` at the repo root (required for Prisma v7 — datasource URL configured here, not in schema; Prisma only loads the root file)
 - **Generated client**: `src/generated/prisma/` (gitignored, regenerate with `npx prisma generate`)
+
+> **One database for every environment.** The `dev`, `stg` and `prd` Doppler
+> configs all point at the same Neon database — the one annotators use. There is
+> no separate dev database. `npm run dev` and `doppler run -c dev` read and write
+> production data. Never run a script that writes (seed, wipe, backfill, fake
+> activity) against it; every script under `scripts/` refuses the production host
+> unless passed `--allow-prod` and a typed confirmation (`scripts/_guard.ts`,
+> 2026-10-19). Use a Neon branch for anything experimental.
 
 ### Prisma v7 Specifics
 - The schema's `datasource db` block has NO `url` — the URL comes from `prisma.config.ts`
@@ -101,6 +109,18 @@ For every team release in a batch:
 
 `TeamBatchRelease.scorerUserId` is legacy. New non-double-scored regular batches leave it null and rely on the slot split. The field is preserved on existing rows but unused by the UI.
 
+**Write scope (2026-10-19).** `PUT /api/scores` is the only raw-score write path. Who may write what is decided by the pure rules in `src/lib/score-write-scope.ts`, shared with the evaluate page: the item must be batched; the caller must hold a `BatchAssignment` on it (there is **no admin bypass** — "Preview Annotator View" is read-only); on a slot-split release the item must be in the caller's slot; on a REGULAR batch every criterion must be the team's, on TRAINING any project criterion. `GET /api/scores` returns only the caller's **own raw** rows (`isReconciled: false`) — reconciled finals are stored under the release owner's `userId` and must never hydrate the scoring or revise screen as if they were that annotator's score.
+
+### Release lifecycle invariants (2026-10-19 audit, PR #15)
+
+- **Batch status** is rolled up from releases by the pure `deriveBatchStatus()` in `team-batch-releases.ts`: releases still in DRAFT are ignored once any release has progressed (no progressed release → DRAFT; all progressed COMPLETE → COMPLETE; any RECONCILING → RECONCILING; else SCORING). A hidden stub release created for a new team therefore never demotes a finished batch, and `ensureTeamReleasesForBatch` creates no stubs on COMPLETE or locked batches.
+- **Completion requires full scoring.** `maybeCompleteReleaseReconciliation` refuses to complete a release that is missing any expected raw score.
+- **A criterion can only be re-opened on a RECONCILING or COMPLETE release.** A revision never moves a SCORING release forward (that is `maybeAdvanceReleaseAfterScore`'s job); it moves a COMPLETE release back to RECONCILING and syncs the batch. Revision runs in one serializable transaction (P2034 → 409), like reconciliation.
+- **A revised cell loses its escalation.** `reReconcileReleaseItem` deletes any `Escalation` (open or resolved) on the revised (item × criterion): an adjudicator's ruling on old values is void, and leaving it would lock the cell forever.
+- **Escalating on a COMPLETE release re-opens it** (RECONCILING + batch sync, one transaction); **withdrawing** an escalation re-checks completion and respects the batch lock.
+- **Self-heal.** The annotator project page calls `healStrandedRelease()` for any SCORING release the viewer has finished, so a release whose last-score advancement failed transiently repairs itself on the next visit.
+- **Teams freeze once scoring starts.** The team picker refuses a third member and refuses to pull someone off a team whose partner has scored (PR #14). Replacing an annotator mid-study has no supported flow yet.
+
 ### Batch lock & editable reconciliation (shipped 2026-06-30)
 
 `COMPLETE` and "frozen" are **separate** concepts:
@@ -129,22 +149,27 @@ On a discrepancy, recording your **own** original value as the final means the p
 - **Project-scoped admin**: a user can be a `PROJECT_ADMIN` on specific projects via `ProjectEvaluator.role` without being a global admin. They get full admin rights on those projects only (rubric, batches, import, export, annotators) and cannot see other projects, manage accounts, send invites, or create projects.
   - **Always authorize project-scoped actions with `canAdminProject(userId, globalRole, projectId)` from `src/lib/authorization.ts`** — never inline `role !== 'ADMIN'`. It returns true for global admins OR project admins of that specific project. Helpers `isGlobalAdmin()` and `getAdminProjectIds()` live alongside it. Checks hit the DB per-request (not the JWT), so role changes take effect immediately.
   - **Global-admin-only routes** (must stay `role !== 'ADMIN'`): `POST /api/projects`, `/api/users/*`, `/api/invite`, `/admin/accounts`.
+  - **Project admins invite annotators through `POST /api/projects/[projectId]/invite`** (PR #13), which can only ever create `EVALUATOR` accounts scoped to that project. Both invite routes share `inviteUser()` in `src/lib/invite.ts` so their rules cannot drift; re-inviting an existing account under a different global role is refused (409).
   - On sign-in, a project admin lands on their project's admin view (`/admin/[projectId]`) — or the filtered `/admin` list if they admin several — not the annotator dashboard. Set/unset the role from a project's Annotators tab ("Make Admin" toggle) or `PATCH /api/projects/[projectId]/evaluators/[userId]/role`.
 - **Role check**: Server components use `const session = await auth()` then check `session.user.role` (global) or `await canAdminProject(...)` (project-scoped)
 - **Magic link login**: StudyFlow sends users to `/login?studyflow_token=...&email=...` — the login page auto-verifies the JWT and creates/finds the evaluator account
 - **Email invite flow**: Admin enters email → Resend sends invite (copy varies by recipient: global admin / project admin / annotator — see `sendInviteEmail` variants in `src/lib/email.ts`) → user clicks link → sets password at `/invite/[token]` → **auto-signed in** and redirected to their dashboard (no second login). Invite links expire in 7 days.
 - **Password reset**: Email-based reset link at `/reset-password`
+- **Email addresses are normalized everywhere** (`src/lib/email-address.ts`: trim + lowercase) — sign-in, invite, reset, account creation, StudyFlow import and the magic-link claim comparison (`src/lib/studyflow-token.ts`).
+- **Accounts with annotation data cannot be deleted.** `DELETE /api/users/[userId]` refuses (409) while the user has any Score, escalation or criterion re-open; `Score.user` and `Escalation.escalatedBy` are `onDelete: Restrict` as the database backstop (PR #14). Remove people from projects instead.
 
 - **Session timeout**: 8 hours (JWT maxAge)
 - **Password policy**: Minimum 8 characters
 - **Security headers**: CSP, HSTS, X-Frame-Options, nosniff, Referrer-Policy, Permissions-Policy (configured in `next.config.ts`)
-- **Score validation**: Server-side validation of score values against rubric scale, dimensionId against project, and batch status (must be SCORING or RECONCILING)
+- **Score validation**: Server-side validation of score values against rubric scale, dimensionId against project, batch/release status, and the write scope (assignment, slot, team criteria — see "Write scope" above)
 
-### Test Accounts (dev-only — seed script refuses to run in production)
-| Email | Password | Role |
-|-------|----------|------|
-| admin@leanlab.org | admin123 | ADMIN |
-| evaluator@test.com | eval123 | EVALUATOR |
+### Test Accounts
+
+There is no separate dev database (see **One database for every environment** above), so **`scripts/seed.ts` must not be run**: it would create a global admin with a published password in the production database (it did, on 2026-03-25; found on 2026-10-19).
+
+- `admin@leanlab.org` (global ADMIN) must stay disabled: no password, no admin role.
+- `evaluator@test.com` is the manual-test annotator on the disposable "Evaluation Testing 2" project. Its password lives in the team password manager, **never in this repo**. Score only there; never add it to a real study.
+- For anything that mutates real data, use a Neon branch.
 
 ## Project Structure
 
@@ -179,7 +204,7 @@ src/
 │       │   ├── assignments/route.ts      # POST (assign all items to evaluators)
 │       │   └── stats/route.ts            # GET (scored item count)
 │       ├── feedback-items/route.ts       # GET (by projectId) / POST (bulk import from CSV)
-│       ├── scores/route.ts              # GET (by projectId) / POST (save score) / PUT (auto-save upsert)
+│       ├── scores/route.ts              # GET (own raw scores) / PUT (the single raw-score write path)
 │       ├── export/route.ts              # GET (CSV export with unblinded feedbackSource)
 │       ├── invite/route.ts              # POST (send invite email)
 │       ├── invite/accept/route.ts       # POST (accept invite + set password)
@@ -205,6 +230,25 @@ src/
 │   ├── studyflow-client.ts              # StudyFlow API client (fetch participants via signed JWT)
 │   ├── tokens.ts                         # Auth token creation/verification (invite, reset)
 │   ├── rubric-templates.ts               # Default rubric (8 generic criteria, 1-3 scale)
+│   ├── reconciliation.ts                 # Release lifecycle: fully-scored, auto-reconcile, completion, re-reconcile, self-heal
+│   ├── team-batch-releases.ts            # Release/assignment sync, slot scope, deriveBatchStatus()
+│   ├── reconciliation-access.ts          # Lock / status guard for every reconciliation write (423)
+│   ├── score-write-scope.ts              # Who may write which raw score (assignment, slot, team criteria)
+│   ├── score-hydration.ts                # Pure merge of own raw rows into the scoring screen state
+│   ├── score-autosave.ts                 # Loss-proof debounced save scheduler for the scoring screen
+│   ├── evaluator-stats.ts                # Slot-aware item/scored counts, every-owed-criterion rule, admin stats loader
+│   ├── annotator-batch-state.ts          # Annotator batch card badge/button from release status + own completion
+│   ├── reconcile-outcome.ts              # Reconcile hub end screen from server status (never client counts)
+│   ├── reconcile-write-guard.ts          # Compare-and-set for reconcile saves (stale partner write → 409)
+│   ├── reconcile-item-state.ts           # Dirty detection for the reconcile hub
+│   ├── project-scope.ts                  # assertProjectMembers / assertProjectDimensions
+│   ├── invite.ts                         # The one place invite rules live (global + project-scoped routes)
+│   ├── email-address.ts                  # normalizeEmail / parseEmail
+│   ├── studyflow-token.ts                # Magic-link JWT verification (issuer/audience/age/email)
+│   ├── callback-url.ts                   # Same-origin-only post-login redirect
+│   ├── export.ts / export-query.ts       # CSV export: pure row builders / Prisma scope queries
+│   ├── irr.ts                            # Inter-rater reliability
+│   ├── activity-tracker.ts               # Platform-time sessions → daily rollups
 │   └── utils.ts                          # cn() helper
 ├── types/
 │   └── next-auth.d.ts                    # Augments Session type with role + id
@@ -297,6 +341,14 @@ every raw score can't exist: two annotators' values don't fit one cell).
 - `src/app/api/export/count/route.ts` — `{rowCount, columnCount}` for the Export
   tab's summary line; column count is derived from the same header builders.
 - `src/components/export-tab.tsx` — the UI.
+- **Independent-batch finals are scoped and conflict-checked (PR #16).** On a
+  non-double-scored batch the "final" raw score is only the one written by the
+  scorer the release expects for that item (`loadIndependentFinalFilter`). If a
+  cell still has more than one distinct candidate, `buildItemGrainRows` leaves it
+  blank and reports it; the download sets `X-Export-Conflicts` and `/api/export/count`
+  returns `conflictCount`. Rows are ordered by numeric Feedback_ID
+  (`compareFeedbackIds`); Scorer A/B on paired batches (incl. TRAINING) is the
+  member's email-order position.
 
 **Column layout**
 - Item grain: 12 input columns, `Batch_Name, Batch_Type, Double_Scored`, then the
@@ -346,6 +398,7 @@ STUDYFLOW_LINK_SECRET       # Shared secret for StudyFlow ↔ Converge JWT signi
 STUDYFLOW_API_URL           # StudyFlow API base URL (for fetching participants)
 RESEND_API_KEY              # Resend email service (invite + password reset emails)
 APP_URL                     # This app's public URL (used in email links)
+CRON_SECRET                 # Bearer token Vercel sends to /api/cron/* — set directly in Vercel (not in Doppler); the sweep route returns 500 in production without it
 ```
 
 ## StudyFlow Integration
@@ -361,7 +414,7 @@ APP_URL                     # This app's public URL (used in email links)
 
 - **Platform**: Vercel (project: `writing-evaluator`)
 - **Production URL**: `https://writing-evaluator.vercel.app`
-- **Env vars**: Managed directly in Vercel (not Doppler — migration pending)
+- **Env vars**: Synced from Doppler, except `CRON_SECRET`, which lives only in Vercel. The daily activity sweep (`vercel.json`, 04:00 UTC — Hobby plan allows daily crons only) authenticates with it.
 
 ## Security
 
@@ -372,6 +425,14 @@ APP_URL                     # This app's public URL (used in email links)
 - **StudyFlow client**: `studyId` validated against `^[a-zA-Z0-9_-]+$` to prevent path traversal
 
 ## Remaining TODO
+
+See `docs/AUDIT-2026-10-19.md` for the full latent-bug audit (what was fixed in PRs #13–#19 and what remains). Open items from it, in priority order:
+
+- [ ] **Persist the release owner and slot** (`TeamBatchRelease.ownerUserId`, `BatchAssignment.slotIndex`) instead of re-deriving them from live email order — an email rename that crosses the partner's email would hide every existing final.
+- [ ] **Pseudonyms do not blind annotators** — `displayAnnotatorName` returns "Pseudonym (Real Name)" and several annotator surfaces ignore the setting (off on every project today).
+- [ ] **Per-project annotator time** — the Annotators tab "Time" column is platform-wide.
+- [ ] **Replace-a-departed-annotator flow** — teams freeze once scoring starts.
+- [ ] **Export tab: show the export conflict count** that `/api/export/count` now returns.
 
 - [ ] **Finish "Converge" rename (~October, once current studies wrap)**: UI display text, email templates, production domain (`writing-evaluator.vercel.app` → new domain + redirect), JWT `audience` claim (coordinate with StudyFlow), Doppler/Neon/Vercel project names. See "Renamed from Writing Evaluator" note above.
 - [ ] Connect to Replit for non-engineer access

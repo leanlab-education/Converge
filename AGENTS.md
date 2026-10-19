@@ -52,7 +52,7 @@ doppler run -p writing-evaluator -c dev -- <command>
 - **DB name**: `neondb`, **User**: `neondb_owner`
 - **Connection string**: In `.env` (gitignored)
 - **Prisma schema**: `prisma/schema.prisma`
-- **Prisma config**: `prisma/prisma.config.ts` (required for Prisma v7 — datasource URL configured here, not in schema)
+- **Prisma config**: `prisma.config.ts` at the repo root (required for Prisma v7 — datasource URL configured here, not in schema; Prisma only loads the root file)
 - **Generated client**: `src/generated/prisma/` (gitignored, regenerate with `npx prisma generate`)
 
 ### Prisma v7 Specifics
