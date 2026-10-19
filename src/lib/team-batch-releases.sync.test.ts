@@ -1,9 +1,13 @@
 // Mock @/lib/db BEFORE importing the module under test.
 import { prismaMock } from '../../test/prisma-mock'
 import { describe, it, expect, beforeEach } from 'vitest'
+import { mockDeep } from 'vitest-mock-extended'
+import type { PrismaClient } from '@/generated/prisma/client'
 import {
+  deriveBatchStatus,
   ensureTeamReleasesForBatch,
   syncBatchAssignmentsForRelease,
+  syncBatchStatus,
   syncTeamAcrossBatches,
 } from '@/lib/team-batch-releases'
 
@@ -183,6 +187,118 @@ describe('syncBatchAssignmentsForRelease', () => {
 })
 
 // ---------------------------------------------------------------------------
+// deriveBatchStatus (pure rollup) — DRAFT releases that never started must not
+// drag a batch backwards once any release has progressed.
+// ---------------------------------------------------------------------------
+describe('deriveBatchStatus', () => {
+  const statuses = (...s: string[]) => s.map((status) => ({ status }))
+
+  it.each([
+    // nothing has started
+    [[], 'DRAFT'],
+    [statuses('DRAFT'), 'DRAFT'],
+    [statuses('DRAFT', 'DRAFT'), 'DRAFT'],
+    // single release
+    [statuses('SCORING'), 'SCORING'],
+    [statuses('RECONCILING'), 'RECONCILING'],
+    [statuses('COMPLETE'), 'COMPLETE'],
+    // mixed progressed releases: furthest-behind-but-started wins
+    [statuses('COMPLETE', 'SCORING'), 'SCORING'],
+    [statuses('COMPLETE', 'RECONCILING'), 'RECONCILING'],
+    [statuses('RECONCILING', 'SCORING'), 'RECONCILING'],
+    [statuses('SCORING', 'SCORING'), 'SCORING'],
+    [statuses('COMPLETE', 'COMPLETE'), 'COMPLETE'],
+    // DRAFT stubs are ignored once anything has progressed
+    [statuses('SCORING', 'DRAFT'), 'SCORING'],
+    [statuses('RECONCILING', 'DRAFT'), 'RECONCILING'],
+    [statuses('COMPLETE', 'DRAFT'), 'COMPLETE'],
+    // the incident: a 5th team's stub on finished batches used to yield DRAFT
+    [statuses('COMPLETE', 'COMPLETE', 'DRAFT'), 'COMPLETE'],
+    [statuses('DRAFT', 'COMPLETE', 'DRAFT', 'COMPLETE'), 'COMPLETE'],
+  ] as [{ status: string }[], string][])('%j → %s', (releases, expected) => {
+    expect(deriveBatchStatus(releases)).toBe(expected)
+  })
+
+  it('unpublishing a SCORING release next to a finished one leaves the batch COMPLETE', () => {
+    // Before: one team done, one team mid-scoring → SCORING.
+    expect(deriveBatchStatus(statuses('COMPLETE', 'SCORING'))).toBe('SCORING')
+    // Admin pulls the SCORING release back to hidden DRAFT (release route).
+    // The only team that ever started is done, so the batch is COMPLETE — not
+    // DRAFT, which would hide it from exports and make it deletable.
+    expect(deriveBatchStatus(statuses('COMPLETE', 'DRAFT'))).toBe('COMPLETE')
+  })
+
+  it('accepts full release objects (extra fields are ignored)', () => {
+    // Callers pass what they already loaded; visibility and ids must not
+    // influence the rollup.
+    const releases = [
+      { id: 'r1', status: 'COMPLETE', isVisible: true },
+      { id: 'r2', status: 'DRAFT', isVisible: false },
+    ]
+    expect(deriveBatchStatus(releases)).toBe('COMPLETE')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// syncBatchStatus persists deriveBatchStatus (+ isAssigned)
+// ---------------------------------------------------------------------------
+describe('syncBatchStatus', () => {
+  it('returns null and writes nothing when the batch is missing', async () => {
+    prismaMock.batch.findUnique.mockResolvedValue(null as never)
+    expect(await syncBatchStatus('missing')).toBeNull()
+    expect(prismaMock.batch.update).not.toHaveBeenCalled()
+  })
+
+  it('keeps a finished batch COMPLETE when a DRAFT stub release exists', async () => {
+    prismaMock.batch.findUnique.mockResolvedValue({
+      id: 'b1',
+      teamReleases: [{ status: 'COMPLETE' }, { status: 'COMPLETE' }, { status: 'DRAFT' }],
+    } as never)
+
+    await syncBatchStatus('b1')
+
+    expect(prismaMock.batch.update).toHaveBeenCalledWith({
+      where: { id: 'b1' },
+      data: { status: 'COMPLETE', isAssigned: true },
+    })
+  })
+
+  it('is DRAFT and unassigned when no release has started', async () => {
+    prismaMock.batch.findUnique.mockResolvedValue({
+      id: 'b1',
+      teamReleases: [{ status: 'DRAFT' }, { status: 'DRAFT' }],
+    } as never)
+
+    await syncBatchStatus('b1')
+
+    expect(prismaMock.batch.update).toHaveBeenCalledWith({
+      where: { id: 'b1' },
+      data: { status: 'DRAFT', isAssigned: false },
+    })
+  })
+
+  it('runs its reads and the write on the client it is given (transaction support)', async () => {
+    const tx = mockDeep<PrismaClient>()
+    tx.batch.findUnique.mockResolvedValue({
+      id: 'b1',
+      teamReleases: [{ status: 'RECONCILING' }],
+    } as never)
+    tx.batch.update.mockResolvedValue({} as never)
+
+    await syncBatchStatus('b1', tx)
+
+    expect(tx.batch.update).toHaveBeenCalledWith({
+      where: { id: 'b1' },
+      data: { status: 'RECONCILING', isAssigned: true },
+    })
+    // Nothing leaked to the shared client — a read there would not see the
+    // transaction's uncommitted writes.
+    expect(prismaMock.batch.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.batch.update).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // ensureTeamReleasesForBatch
 // ---------------------------------------------------------------------------
 describe('ensureTeamReleasesForBatch', () => {
@@ -191,6 +307,31 @@ describe('ensureTeamReleasesForBatch', () => {
     await expect(ensureTeamReleasesForBatch('missing')).rejects.toThrow(
       'Batch not found'
     )
+  })
+
+  it.each([
+    ['COMPLETE', { status: 'COMPLETE', isLocked: false }],
+    ['admin-locked', { status: 'SCORING', isLocked: true }],
+  ])('creates no stub release on a %s batch and leaves its status alone', async (_label, batchState) => {
+    prismaMock.batch.findUnique.mockResolvedValue({
+      id: 'b1',
+      projectId: 'p1',
+      ...batchState,
+      teamReleases: [{ teamId: 'T1' }], // T2 would be "missing"
+    } as never)
+    prismaMock.evaluatorTeam.findMany.mockResolvedValue([
+      { id: 'T1' },
+      { id: 'T2' },
+    ] as never)
+
+    const created = await ensureTeamReleasesForBatch('b1')
+
+    expect(created).toEqual([])
+    // Bails before even looking at the project's teams.
+    expect(prismaMock.evaluatorTeam.findMany).not.toHaveBeenCalled()
+    expect(prismaMock.teamBatchRelease.create).not.toHaveBeenCalled()
+    // No syncBatchStatus → the finished batch cannot be demoted.
+    expect(prismaMock.batch.update).not.toHaveBeenCalled()
   })
 
   it('is a no-op when every project team already has a release', async () => {

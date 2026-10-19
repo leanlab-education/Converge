@@ -1,4 +1,14 @@
 import { prisma } from '@/lib/db'
+import type { Prisma } from '@/generated/prisma/client'
+
+/**
+ * Either the shared Prisma client or the `tx` handed to an interactive
+ * `$transaction` callback. Lifecycle helpers accept this so a route can run the
+ * write that changes the truth AND the status re-derivation that reads it
+ * inside one transaction; a read on the shared client would not see the
+ * transaction's uncommitted writes.
+ */
+export type DbClient = Prisma.TransactionClient
 
 interface ReleaseWithContext {
   id: string
@@ -149,8 +159,49 @@ export function getReleaseUserSlotIndex(
   return idx === -1 ? null : idx
 }
 
-export async function syncBatchStatus(batchId: string) {
-  const batch = await prisma.batch.findUnique({
+export type DerivedBatchStatus = 'DRAFT' | 'SCORING' | 'RECONCILING' | 'COMPLETE'
+
+/**
+ * Roll a batch's status up from its team releases. Pure; `syncBatchStatus`
+ * persists the result.
+ *
+ * A DRAFT release has never been worked: either nobody has published the batch
+ * yet, or it is a hidden stub that `ensureTeamReleasesForBatch` back-filled for
+ * a team created after the batch existed. Stubs must not drag a batch
+ * backwards. The previous rule ("every COMPLETE → COMPLETE, else any
+ * RECONCILING, else any SCORING, else DRAFT") turned [COMPLETE, COMPLETE, DRAFT]
+ * into DRAFT, so adding a fifth team to a project demoted every finished batch
+ * to DRAFT — dropping them from the final-by-item and discrepancy exports
+ * (status ≠ DRAFT scope), showing them as inactive, and making them deletable.
+ *
+ * So DRAFT releases are ignored as soon as any release has progressed:
+ *
+ *   no release past DRAFT              → DRAFT
+ *   every progressed release COMPLETE  → COMPLETE
+ *   any progressed release RECONCILING → RECONCILING
+ *   otherwise                          → SCORING
+ *
+ * Unpublishing a SCORING release next to a finished one ([COMPLETE,
+ * SCORING→DRAFT]) therefore leaves the batch COMPLETE: the only team that ever
+ * started is done. Visibility is deliberately not an input — a DRAFT release is
+ * never visible, and a hidden release that has progressed still holds work.
+ */
+export function deriveBatchStatus(
+  releases: { status: string }[]
+): DerivedBatchStatus {
+  const progressed = releases.filter((release) => release.status !== 'DRAFT')
+  if (progressed.length === 0) return 'DRAFT'
+  if (progressed.every((release) => release.status === 'COMPLETE')) {
+    return 'COMPLETE'
+  }
+  if (progressed.some((release) => release.status === 'RECONCILING')) {
+    return 'RECONCILING'
+  }
+  return 'SCORING'
+}
+
+export async function syncBatchStatus(batchId: string, db: DbClient = prisma) {
+  const batch = await db.batch.findUnique({
     where: { id: batchId },
     select: {
       id: true,
@@ -166,23 +217,11 @@ export async function syncBatchStatus(batchId: string) {
     return null
   }
 
-  const statuses = batch.teamReleases.map((release) => release.status)
-  const nextStatus =
-    statuses.length === 0
-      ? 'DRAFT'
-      : statuses.every((status) => status === 'COMPLETE')
-        ? 'COMPLETE'
-        : statuses.some((status) => status === 'RECONCILING')
-          ? 'RECONCILING'
-          : statuses.some((status) => status === 'SCORING')
-            ? 'SCORING'
-            : 'DRAFT'
-
-  return prisma.batch.update({
+  return db.batch.update({
     where: { id: batchId },
     data: {
-      status: nextStatus,
-      isAssigned: statuses.some((status) => status !== 'DRAFT'),
+      status: deriveBatchStatus(batch.teamReleases),
+      isAssigned: batch.teamReleases.some((release) => release.status !== 'DRAFT'),
     },
   })
 }
@@ -198,6 +237,12 @@ export async function syncBatchStatus(batchId: string) {
  * This back-fills them. It never removes releases for teams that no longer
  * exist. New releases are hidden (isVisible=false) so assignment stays
  * decoupled from visibility.
+ *
+ * Finished work is left alone: a batch that is COMPLETE or admin-locked gets
+ * no stub releases. A new team has nothing to do on a batch whose scoring is
+ * over, and the stub would only exist to be mis-read — it is what used to
+ * demote finished batches to DRAFT (see deriveBatchStatus) and what makes a
+ * COMPLETE batch look like it has an unstarted team.
  */
 export async function ensureTeamReleasesForBatch(
   batchId: string
@@ -207,11 +252,16 @@ export async function ensureTeamReleasesForBatch(
     select: {
       id: true,
       projectId: true,
+      status: true,
+      isLocked: true,
       teamReleases: { select: { teamId: true } },
     },
   })
   if (!batch) {
     throw new Error('Batch not found')
+  }
+  if (batch.status === 'COMPLETE' || batch.isLocked) {
+    return []
   }
 
   const existingTeamIds = new Set(batch.teamReleases.map((r) => r.teamId))
@@ -265,12 +315,13 @@ export async function syncTeamAcrossBatches(teamId: string) {
     select: { id: true },
   })
   // Create any missing releases (covers a newly-created team) + wire their
-  // assignments.
+  // assignments. Skips COMPLETE / locked batches — nothing to start there.
   for (const batch of batches) {
     await ensureTeamReleasesForBatch(batch.id)
   }
   // Re-sync assignments for this team's existing releases (covers membership
-  // changes on a team that already had releases).
+  // changes on a team that already had releases). This still runs for releases
+  // on finished batches, so an existing release is never left stale.
   const releases = await prisma.teamBatchRelease.findMany({
     where: { teamId, batch: { projectId: team.projectId } },
     select: { id: true },

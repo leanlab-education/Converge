@@ -3,7 +3,11 @@ import { prisma } from '@/lib/db'
 import { redirect } from 'next/navigation'
 import { EvaluatorProjectPage } from './evaluator-project-page'
 import { countForAssignment, loadSlotMaps } from '@/lib/evaluator-stats'
-import { computeReleaseDiscrepancyStats } from '@/lib/reconciliation'
+import {
+  computeReleaseDiscrepancyStats,
+  healStrandedRelease,
+  shouldListReconcileTask,
+} from '@/lib/reconciliation'
 import { releaseNeedsReconciliation } from '@/lib/team-batch-releases'
 import { unlockVisibleToUserWhere } from '@/lib/criterion-unlocks'
 import { displayAnnotatorName } from '@/lib/generate-name'
@@ -95,6 +99,46 @@ export default async function ProjectPage({
   const { itemCountByBatchSlot, scoredCountByUser } = await loadSlotMaps(batchAssignments)
   const scoredCountByBatchSlot = scoredCountByUser.get(userId) ?? new Map()
 
+  // --- Self-heal: a release whose scoring is finished but is still SCORING ---
+  // The SCORING → RECONCILING/COMPLETE transition runs after every score save,
+  // but the scores route deliberately swallows its failure so a transient DB
+  // error can't fail the save itself. If that happens on the LAST score nothing
+  // ever re-runs it, and a 100%-scored release sits in SCORING with both
+  // partners shown "Waiting on partner" indefinitely. This page is the one place
+  // either partner reliably comes back to, so it re-runs the check here.
+  //
+  // A side effect in a server render is accepted deliberately: the check is
+  // idempotent, it runs only for the handful of SCORING releases where this
+  // user's own share is complete (anyone else's visit can't have changed the
+  // outcome), it no-ops unless every expected score exists, and it never
+  // throws. It runs BEFORE the card list and task lists are built so they show
+  // the repaired status, not the stale one.
+  const healCandidates = batchAssignments.filter((ba) => {
+    if (ba.teamRelease?.status !== 'SCORING') return false
+    const itemCount = countForAssignment(ba, userId, itemCountByBatchSlot)
+    return (
+      itemCount > 0 &&
+      countForAssignment(ba, userId, scoredCountByBatchSlot) >= itemCount
+    )
+  })
+  const healedReleaseIds: string[] = []
+  for (const ba of healCandidates) {
+    if (await healStrandedRelease(ba.teamRelease!.id)) {
+      healedReleaseIds.push(ba.teamRelease!.id)
+    }
+  }
+  if (healedReleaseIds.length > 0) {
+    const refreshed = await prisma.teamBatchRelease.findMany({
+      where: { id: { in: healedReleaseIds } },
+      select: { id: true, status: true },
+    })
+    const statusById = new Map(refreshed.map((r) => [r.id, r.status]))
+    for (const ba of batchAssignments) {
+      const next = ba.teamRelease ? statusById.get(ba.teamRelease.id) : undefined
+      if (next) ba.teamRelease!.status = next
+    }
+  }
+
   const batches = batchAssignments.map((ba) => {
     const itemCount = countForAssignment(ba, userId, itemCountByBatchSlot)
     const scoredCount = countForAssignment(ba, userId, scoredCountByBatchSlot)
@@ -137,6 +181,22 @@ export default async function ProjectPage({
     if (status === 'COMPLETE' && !ba.batch.isLocked) return true
     return false
   })
+  // Releases among the candidates that an admin currently has a criterion
+  // re-opened on — any scope, since a partner-only re-open still means there is
+  // nothing for this user to reconcile until the partner revises. Feeds
+  // shouldListReconcileTask, which uses it to drop the phantom "Reconcile" entry
+  // a re-open would otherwise create (the Revise task covers that work).
+  const candidateReleaseIds = reconcileCandidates.map((ba) => ba.teamRelease!.id)
+  const releaseIdsWithOpenUnlock = new Set(
+    candidateReleaseIds.length === 0
+      ? []
+      : (
+          await prisma.releaseCriterionUnlock.findMany({
+            where: { teamReleaseId: { in: candidateReleaseIds } },
+            select: { teamReleaseId: true },
+          })
+        ).map((u) => u.teamReleaseId)
+  )
   const reconcileTasks = (
     await Promise.all(
       reconcileCandidates.map(async (ba) => {
@@ -148,9 +208,14 @@ export default async function ProjectPage({
           memberUserIds: release.team.members.map((m) => m.userId),
           teamDimensionIds: release.team.dimensions.map((d) => d.dimensionId),
         })
-        // A completed release with no discrepancies had nothing to reconcile —
-        // don't clutter the list with a non-actionable "edit" entry.
-        if (release.status === 'COMPLETE' && stats.discrepancyCount === 0) {
+        if (
+          !shouldListReconcileTask({
+            status: release.status,
+            discrepancyCount: stats.discrepancyCount,
+            reconciledCount: stats.reconciledCount,
+            hasOpenUnlock: releaseIdsWithOpenUnlock.has(release.id),
+          })
+        ) {
           return null
         }
         const partner = release.team.members.find((m) => m.userId !== userId)?.user ?? null

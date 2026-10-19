@@ -1,6 +1,7 @@
 import { auth } from '@/lib/auth'
 import { unlockVisibleToUserWhere } from '@/lib/criterion-unlocks'
 import { prisma } from '@/lib/db'
+import { Prisma } from '@/generated/prisma/client'
 import { reReconcileReleaseItem } from '@/lib/reconciliation'
 import { getReleaseItemScope } from '@/lib/team-batch-releases'
 import { NextRequest, NextResponse } from 'next/server'
@@ -132,56 +133,85 @@ export async function POST(
     )
   }
 
-  // Look at the annotator's current raw score so we only re-derive reconciliation
-  // when the value actually changed. This is important: the scoring screen
-  // auto-saves on navigation, so an unchanged re-save must NOT disturb an
-  // existing (possibly manually reconciled) item.
-  const existing = await prisma.score.findUnique({
-    where: {
-      feedbackItemId_userId_dimensionId_isReconciled: {
-        feedbackItemId,
-        userId: session.user.id,
-        dimensionId,
-        isReconciled: false,
-      },
-    },
-    select: { value: true },
-  })
-  const valueChanged = !existing || existing.value !== value
-
-  // Overwrite the annotator's own raw score (Amber: no per-edit history needed —
-  // the revised value simply becomes their score).
-  await prisma.score.upsert({
-    where: {
-      feedbackItemId_userId_dimensionId_isReconciled: {
-        feedbackItemId,
-        userId: session.user.id,
-        dimensionId,
-        isReconciled: false,
-      },
-    },
-    update: {
-      value,
-      ...(valueChanged ? { scoredAt: new Date() } : {}),
-      ...(notes !== undefined ? { notes: notes || null } : {}),
-    },
-    create: {
-      feedbackItemId,
-      userId: session.user.id,
-      dimensionId,
-      value,
-      notes: notes ?? 'Revised (criterion re-opened)',
-    },
-  })
-
-  // Only re-settle reconciliation when the score actually changed — an unchanged
-  // re-save (e.g. from navigation auto-save) leaves existing reconciliations
-  // untouched. Independent (non-double-scored regular) releases never reconcile:
-  // the revised raw score IS the final score, so there is nothing to re-derive.
+  // Independent (non-double-scored regular) releases never reconcile: the
+  // revised raw score IS the final score, so there is nothing to re-derive.
   const releaseReconciles =
     release.batch.type === 'TRAINING' || release.batch.isDoubleScored
-  if (valueChanged && releaseReconciles) {
-    await reReconcileReleaseItem(release.id, feedbackItemId, dimensionId)
+
+  // The raw-score write and the reconciliation re-derivation it triggers run in
+  // ONE serializable transaction, like the reconcile route. Without it, a
+  // failure between the two left a changed raw score next to a stale final
+  // (and a stale release status), and a concurrent partner revision could read
+  // the pair mid-change. Serializable → a conflicting concurrent write aborts
+  // (P2034) → 409, and any failure rolls back with nothing partially applied.
+  try {
+    await prisma.$transaction(
+      async (tx) => {
+        // Look at the annotator's current raw score so we only re-derive
+        // reconciliation when the value actually changed. This is important:
+        // the scoring screen auto-saves on navigation, so an unchanged re-save
+        // must NOT disturb an existing (possibly manually reconciled) item.
+        const existing = await tx.score.findUnique({
+          where: {
+            feedbackItemId_userId_dimensionId_isReconciled: {
+              feedbackItemId,
+              userId: session.user.id,
+              dimensionId,
+              isReconciled: false,
+            },
+          },
+          select: { value: true },
+        })
+        const valueChanged = !existing || existing.value !== value
+
+        // Overwrite the annotator's own raw score (Amber: no per-edit history
+        // needed — the revised value simply becomes their score).
+        await tx.score.upsert({
+          where: {
+            feedbackItemId_userId_dimensionId_isReconciled: {
+              feedbackItemId,
+              userId: session.user.id,
+              dimensionId,
+              isReconciled: false,
+            },
+          },
+          update: {
+            value,
+            ...(valueChanged ? { scoredAt: new Date() } : {}),
+            ...(notes !== undefined ? { notes: notes || null } : {}),
+          },
+          create: {
+            feedbackItemId,
+            userId: session.user.id,
+            dimensionId,
+            value,
+            notes: notes ?? 'Revised (criterion re-opened)',
+          },
+        })
+
+        // Only re-settle reconciliation when the score actually changed — an
+        // unchanged re-save (e.g. from navigation auto-save) leaves existing
+        // reconciliations untouched.
+        if (valueChanged && releaseReconciles) {
+          await reReconcileReleaseItem(release.id, feedbackItemId, dimensionId, tx)
+        }
+      },
+      { isolationLevel: 'Serializable' }
+    )
+  } catch (err) {
+    if (
+      err instanceof Prisma.PrismaClientKnownRequestError &&
+      err.code === 'P2034'
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            'This item was just updated by someone else (likely your partner). Reload to see the latest scores, then try again.',
+        },
+        { status: 409 }
+      )
+    }
+    throw err
   }
 
   return NextResponse.json({ saved: true })

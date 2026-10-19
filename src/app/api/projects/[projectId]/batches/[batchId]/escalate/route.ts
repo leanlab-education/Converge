@@ -1,7 +1,14 @@
 import { auth } from '@/lib/auth'
 import { canAdminProject } from '@/lib/authorization'
 import { prisma } from '@/lib/db'
+import { Prisma } from '@/generated/prisma/client'
+import { maybeCompleteReleaseReconciliation } from '@/lib/reconciliation'
 import { evaluateReconciliationAccess } from '@/lib/reconciliation-access'
+import {
+  getExpectedReleaseDimensionIds,
+  releaseNeedsReconciliation,
+  syncBatchStatus,
+} from '@/lib/team-batch-releases'
 import { NextRequest, NextResponse } from 'next/server'
 
 // POST /api/projects/[projectId]/batches/[batchId]/escalate
@@ -52,13 +59,35 @@ export async function POST(
     where: { id: releaseId },
     include: {
       batch: {
-        select: { projectId: true, isLocked: true },
+        select: {
+          id: true,
+          projectId: true,
+          isLocked: true,
+          type: true,
+          isDoubleScored: true,
+        },
+      },
+      team: {
+        include: {
+          members: { select: { userId: true } },
+          dimensions: { select: { dimensionId: true } },
+        },
       },
     },
   })
 
   if (!release || release.batchId !== batchId || release.batch.projectId !== projectId) {
     return NextResponse.json({ error: 'Release not found' }, { status: 404 })
+  }
+
+  // Independent (slot-split) releases hold one raw score per cell — there is no
+  // disagreement to escalate and no adjudicated final to write. Mirrors the
+  // reconcile route.
+  if (!releaseNeedsReconciliation(release)) {
+    return NextResponse.json(
+      { error: 'This release has no reconciliation step' },
+      { status: 400 }
+    )
   }
 
   const access = evaluateReconciliationAccess({
@@ -96,7 +125,7 @@ export async function POST(
   // Verify the item belongs to this batch
   const item = await prisma.feedbackItem.findUnique({
     where: { id: feedbackItemId },
-    select: { batchId: true, projectId: true },
+    select: { batchId: true },
   })
   if (!item || item.batchId !== batchId) {
     return NextResponse.json(
@@ -105,32 +134,65 @@ export async function POST(
     )
   }
 
-  // Verify dimension belongs to the project
-  const dimension = await prisma.rubricDimension.findUnique({
-    where: { id: dimensionId },
-    select: { projectId: true },
-  })
-  if (!dimension || dimension.projectId !== item.projectId) {
+  // The dimension must be one THIS release scores — the team's criteria on a
+  // regular batch, the whole rubric on training — not merely one that exists in
+  // the project. An escalation on a criterion the pair never scored could never
+  // be adjudicated against two originals. Mirrors the reconcile route.
+  const projectDimensionIds =
+    release.batch.type === 'TRAINING'
+      ? (
+          await prisma.rubricDimension.findMany({
+            where: { projectId },
+            select: { id: true },
+          })
+        ).map((dimension) => dimension.id)
+      : []
+  const allowedDimensionIds = new Set(
+    getExpectedReleaseDimensionIds(release, projectDimensionIds)
+  )
+  if (!allowedDimensionIds.has(dimensionId)) {
     return NextResponse.json(
-      { error: 'Invalid dimension for this project' },
+      { error: 'That criterion is not part of this release' },
       { status: 400 }
     )
   }
 
+  // Escalating on a COMPLETE release is the edit-after-completion flow: the
+  // pair revisited a final and now can't agree. The release has open work
+  // again, so it must go back to RECONCILING (and the batch must follow, or
+  // the "finalized batches only" export keeps shipping the old final while an
+  // escalation is open). One transaction, so an open escalation can never
+  // exist on a release still marked COMPLETE.
+  const reopening = release.status === 'COMPLETE'
   try {
-    const escalation = await prisma.escalation.create({
-      data: {
-        batchId,
-        teamReleaseId: releaseId,
-        feedbackItemId,
-        dimensionId,
-        escalatedById: session.user.id,
-      },
+    const escalation = await prisma.$transaction(async (tx) => {
+      const created = await tx.escalation.create({
+        data: {
+          batchId,
+          teamReleaseId: releaseId,
+          feedbackItemId,
+          dimensionId,
+          escalatedById: session.user.id,
+        },
+      })
+      if (reopening) {
+        await tx.teamBatchRelease.update({
+          where: { id: releaseId },
+          data: { status: 'RECONCILING' },
+        })
+      }
+      return created
     })
+    if (reopening) {
+      await syncBatchStatus(batchId)
+    }
     return NextResponse.json(escalation, { status: 201 })
   } catch (err) {
     // Unique constraint violation → already escalated
-    if (err instanceof Error && err.message.includes('Unique constraint')) {
+    if (
+      err instanceof Prisma.PrismaClientKnownRequestError &&
+      err.code === 'P2002'
+    ) {
       return NextResponse.json(
         { error: 'This criterion has already been escalated' },
         { status: 409 }
@@ -169,12 +231,23 @@ export async function DELETE(
     where: { id: releaseId },
     include: {
       batch: {
-        select: { projectId: true },
+        select: { projectId: true, isLocked: true },
       },
     },
   })
   if (!release || release.batchId !== batchId || release.batch.projectId !== projectId) {
     return NextResponse.json({ error: 'Release not found' }, { status: 404 })
+  }
+
+  // Withdrawing changes the release's open work, so it is a reconciliation
+  // write like any other: refused on a locked batch (423) or outside a
+  // reconcilable status (400).
+  const access = evaluateReconciliationAccess({
+    isLocked: release.batch.isLocked,
+    status: release.status,
+  })
+  if (!access.ok) {
+    return NextResponse.json({ error: access.error }, { status: access.httpStatus })
   }
 
   const escalation = await prisma.escalation.findUnique({
@@ -207,5 +280,11 @@ export async function DELETE(
   }
 
   await prisma.escalation.delete({ where: { id: escalation.id } })
+
+  // This may have been the last thing keeping the release open: an escalation
+  // blocks completion, and once every other discrepancy is reconciled nothing
+  // else will ever re-check. Idempotent; no-ops while work remains.
+  await maybeCompleteReleaseReconciliation(releaseId)
+
   return NextResponse.json({ withdrawn: true })
 }
