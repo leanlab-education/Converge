@@ -15,6 +15,10 @@ type Params = Promise<{ projectId: string; userId: string }>
 //
 // Blocks the change if the user already has scores tied to either the
 // current or destination team's dimensions, to avoid orphaning data.
+//
+// Teams are scoring pairs (exactly 2 members — enforced by teams POST/PATCH),
+// so this route also refuses to grow the destination past 2 or to leave a
+// partner alone with scores already recorded on the team's criteria.
 export async function PUT(request: Request, { params }: { params: Params }) {
   const session = await auth()
   if (!session?.user) {
@@ -40,20 +44,32 @@ export async function PUT(request: Request, { params }: { params: Params }) {
   }
 
   // Verify destination team if provided
+  let destinationTeam: { id: string; name: string; memberCount: number } | null =
+    null
   if (teamId !== null) {
     const team = await prisma.evaluatorTeam.findUnique({
       where: { id: teamId },
-      select: { id: true, projectId: true },
+      select: {
+        id: true,
+        name: true,
+        projectId: true,
+        _count: { select: { members: true } },
+      },
     })
     if (!team || team.projectId !== projectId) {
       return NextResponse.json({ error: 'Team not found' }, { status: 404 })
+    }
+    destinationTeam = {
+      id: team.id,
+      name: team.name,
+      memberCount: team._count.members,
     }
   }
 
   // Find current memberships in this project
   const currentMemberships = await prisma.evaluatorTeamMember.findMany({
     where: { userId, team: { projectId } },
-    include: { team: { include: { dimensions: true } } },
+    include: { team: { include: { dimensions: true, members: true } } },
   })
 
   const currentTeamIds = currentMemberships.map((m) => m.teamId)
@@ -62,6 +78,45 @@ export async function PUT(request: Request, { params }: { params: Params }) {
   // No-op if already in the target team and not on any other team
   if (alreadyOnTarget && currentMemberships.length === 1) {
     return NextResponse.json({ teamId })
+  }
+
+  // A team is a scoring pair. A third member would make reconciliation bail
+  // (it requires exactly 2 scorers) and brick the release.
+  if (destinationTeam && !alreadyOnTarget && destinationTeam.memberCount >= 2) {
+    return NextResponse.json(
+      {
+        error: `"${destinationTeam.name}" already has 2 members. Remove one of them first.`,
+      },
+      { status: 409 }
+    )
+  }
+
+  // Leaving a team strands the partner with the pair's criteria. If the
+  // partner has already scored on them, the team's data would be left with
+  // one scorer and no way to reconcile. Mirrors the self-score guard below.
+  const teamsBeingLeft = currentMemberships.filter((m) => m.teamId !== teamId)
+  for (const membership of teamsBeingLeft) {
+    const partnerIds = membership.team.members
+      .map((m) => m.userId)
+      .filter((id) => id !== userId)
+    const teamDimensionIds = membership.team.dimensions.map((d) => d.dimensionId)
+    if (partnerIds.length === 0 || teamDimensionIds.length === 0) continue
+
+    const partnerScoreCount = await prisma.score.count({
+      where: {
+        userId: { in: partnerIds },
+        dimensionId: { in: teamDimensionIds },
+        feedbackItem: { projectId },
+      },
+    })
+    if (partnerScoreCount > 0) {
+      return NextResponse.json(
+        {
+          error: `Cannot remove this annotator from "${membership.team.name}": their partner has already scored items on the team's criteria.`,
+        },
+        { status: 409 }
+      )
+    }
   }
 
   // Collect dimensions for current teams + destination team

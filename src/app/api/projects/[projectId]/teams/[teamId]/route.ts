@@ -1,7 +1,14 @@
 import { auth } from '@/lib/auth'
 import { canAdminProject } from '@/lib/authorization'
 import { prisma } from '@/lib/db'
-import { syncTeamAcrossBatches } from '@/lib/team-batch-releases'
+import {
+  assertProjectDimensions,
+  assertProjectMembers,
+} from '@/lib/project-scope'
+import {
+  syncBatchStatus,
+  syncTeamAcrossBatches,
+} from '@/lib/team-batch-releases'
 import { NextRequest, NextResponse } from 'next/server'
 
 type Params = Promise<{ projectId: string; teamId: string }>
@@ -79,11 +86,16 @@ export async function PATCH(request: Request, { params }: { params: Params }) {
   // Validate new members aren't on other teams
   if (memberUserIds) {
     // A team is a scoring pair — exactly 2 distinct members (see P2 / teams POST).
-    if (new Set(memberUserIds).size !== 2) {
+    if (!Array.isArray(memberUserIds) || new Set(memberUserIds).size !== 2) {
       return NextResponse.json(
         { error: 'A team must have exactly 2 distinct members (a scoring pair).' },
         { status: 400 }
       )
+    }
+    // ...and both must be annotators on THIS project (audit H-A2).
+    const memberScope = await assertProjectMembers(projectId, memberUserIds)
+    if (!memberScope.ok) {
+      return NextResponse.json({ error: memberScope.error }, { status: 400 })
     }
     const existingMemberships = await prisma.evaluatorTeamMember.findMany({
       where: {
@@ -109,6 +121,17 @@ export async function PATCH(request: Request, { params }: { params: Params }) {
 
   // Validate dimensions aren't assigned elsewhere
   if (dimensionIds) {
+    if (!Array.isArray(dimensionIds)) {
+      return NextResponse.json(
+        { error: 'dimensionIds must be an array' },
+        { status: 400 }
+      )
+    }
+    // Criteria must come from THIS project's rubric (audit H-A2).
+    const dimensionScope = await assertProjectDimensions(projectId, dimensionIds)
+    if (!dimensionScope.ok) {
+      return NextResponse.json({ error: dimensionScope.error }, { status: 400 })
+    }
     const existingDimAssignments =
       await prisma.evaluatorTeamDimension.findMany({
         where: {
@@ -211,16 +234,23 @@ export async function DELETE(
     return NextResponse.json({ error: 'Team not found' }, { status: 404 })
   }
 
-  // Check for existing scores
+  // Check for existing scores by this team's members: on the team's criteria
+  // anywhere in the project, or on ANY criterion in a batch this team was
+  // released on (training batches score every criterion). Deleting the team
+  // would cascade its releases and strip the scores of their team context.
   const memberIds = team.members.map((m) => m.userId)
   const dimIds = team.dimensions.map((d) => d.dimensionId)
 
-  if (memberIds.length > 0 && dimIds.length > 0) {
+  if (memberIds.length > 0) {
     const scoreCount = await prisma.score.count({
       where: {
         userId: { in: memberIds },
-        dimensionId: { in: dimIds },
-        feedbackItem: { projectId },
+        OR: [
+          ...(dimIds.length > 0
+            ? [{ dimensionId: { in: dimIds }, feedbackItem: { projectId } }]
+            : []),
+          { feedbackItem: { batch: { teamReleases: { some: { teamId } } } } },
+        ],
       },
     })
 
@@ -232,8 +262,29 @@ export async function DELETE(
     }
   }
 
-  // Cascade handles members + dimensions
-  await prisma.evaluatorTeam.delete({ where: { id: teamId } })
+  // Batches whose status must be re-derived once this team's releases go.
+  const releases = await prisma.teamBatchRelease.findMany({
+    where: { teamId },
+    select: { batchId: true },
+  })
+  const batchIds = Array.from(new Set(releases.map((r) => r.batchId)))
+
+  await prisma.$transaction(async (tx) => {
+    // TeamBatchRelease cascades with the team, but BatchAssignment.teamRelease
+    // is SetNull: left alone, the ex-members would keep assignment rows with
+    // teamReleaseId=null, which every consumer (dashboard, feedback-items,
+    // scores) reads as legacy whole-batch, every-criterion access. Remove them
+    // first, as the release DELETE route does.
+    await tx.batchAssignment.deleteMany({
+      where: { teamRelease: { teamId } },
+    })
+    // Cascade handles members, dimensions, and releases.
+    await tx.evaluatorTeam.delete({ where: { id: teamId } })
+  })
+
+  for (const batchId of batchIds) {
+    await syncBatchStatus(batchId)
+  }
 
   return NextResponse.json({ deleted: true })
 }
