@@ -176,7 +176,34 @@ export async function DELETE(
     )
   }
 
-  await prisma.batch.delete({ where: { id: batchId } })
+  // DRAFT does not mean unscored: unpublishing pulls SCORING releases back to
+  // DRAFT even when scores exist. FeedbackItem.batch is SetNull, so deleting
+  // would leave the items in the pool with their Score rows, slotIndex and
+  // displayOrder intact — and the next batch built over them would reuse the
+  // stale slots (assignBatchSlots early-returns when every item has one) and
+  // count the stale scores toward its release. Refuse instead.
+  const scoreCount = await prisma.score.count({
+    where: { feedbackItem: { batchId } },
+  })
+
+  if (scoreCount > 0) {
+    return NextResponse.json(
+      {
+        error: `This batch has ${scoreCount.toLocaleString('en-US')} recorded ${scoreCount === 1 ? 'score' : 'scores'}. Deleting it would orphan annotation data. Leave it unpublished instead.`,
+      },
+      { status: 409 }
+    )
+  }
+
+  await prisma.$transaction([
+    // Reset per-batch item state before the FK SetNull detaches the items, so
+    // the next batch over them gets a fresh slot shuffle and display order.
+    prisma.feedbackItem.updateMany({
+      where: { batchId },
+      data: { slotIndex: null, displayOrder: null },
+    }),
+    prisma.batch.delete({ where: { id: batchId } }),
+  ])
 
   return NextResponse.json({ success: true })
 }

@@ -246,16 +246,26 @@ export function BatchCreator({
   }
 
   async function handleDeleteBatch(batchId: string) {
-    if (!confirm('Delete this batch? Items will return to the unbatched pool.')) return
+    if (
+      !confirm(
+        'Delete this batch? Its items return to the unbatched pool and lose their slot and display order. Batches with recorded scores cannot be deleted.'
+      )
+    )
+      return
     try {
       const response = await fetch(`/api/projects/${projectId}/batches/${batchId}`, {
         method: 'DELETE',
       })
       if (response.ok) {
         await onBatchesChange()
+      } else {
+        // The server explains why (e.g. the batch still holds scores).
+        const payload = await response.json().catch(() => null)
+        alert(payload?.error || 'Failed to delete batch')
       }
     } catch (error) {
       console.error('Failed to delete batch:', error)
+      alert('Something went wrong while deleting the batch.')
     }
   }
 
