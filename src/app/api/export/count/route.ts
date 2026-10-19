@@ -76,7 +76,7 @@ export async function GET(request: NextRequest) {
   }
 
   const scope = parseExportScope(params, projectId)
-  const rowCount = await countExportRows(kind, scope, dimensionKeys)
+  const { rowCount, conflictCount } = await countExportRows(kind, scope, dimensionKeys)
 
   // Derived from the same header builders the download route uses, so the
   // count can't drift from the file.
@@ -84,5 +84,7 @@ export async function GET(request: NextRequest) {
     ? itemGrainHeader(dimensionLabels)
     : scorerGrainHeader(dimensionLabels)
 
-  return NextResponse.json({ rowCount, columnCount: header.length })
+  // conflictCount: item-grain cells the file will leave blank because more
+  // than one distinct final existed for that (item × criterion).
+  return NextResponse.json({ rowCount, columnCount: header.length, conflictCount })
 }

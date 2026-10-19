@@ -16,8 +16,15 @@ import {
   itemGrainHeader,
   scorerGrainCells,
   scorerGrainHeader,
+  scoringRoleLabel,
+  usesFinalScores,
   type ExportKind,
+  type ItemGrainConflict,
 } from '@/lib/export'
+import {
+  createExpectedScoreFilter,
+  type RawScoreForStats,
+} from '@/lib/evaluator-stats'
 
 export interface ExportScope {
   projectId: string
@@ -91,12 +98,22 @@ function itemGrainWhere(scope: ExportScope): Prisma.FeedbackItemWhereInput {
   }
 }
 
+/** Batches whose raw scores stand in as finals (they never reconcile). */
+const INDEPENDENT_BATCH_WHERE: Prisma.BatchWhereInput = {
+  type: 'REGULAR',
+  isDoubleScored: false,
+}
+
 /**
  * Score selector.
  *
  * "final" = the final value per item: the reconciled/adjudicated row for
- * double-scored & training batches, plus the lone score for single-scored
+ * double-scored & training batches, plus the raw score for single-scored
  * regular batches (which never reconcile). "raw" = every score as entered.
+ *
+ * The raw half of "final" is only a *candidate* set: the database cannot say
+ * which raw score on an independent batch is the expected scorer's, so the
+ * caller must run `loadIndependentFinalFilter` over the result.
  */
 function scoreSelectorWhere(kind: ExportKind): Prisma.ScoreWhereInput {
   if (kind === 'raw-by-scorer') return { isReconciled: false }
@@ -105,17 +122,84 @@ function scoreSelectorWhere(kind: ExportKind): Prisma.ScoreWhereInput {
       { isReconciled: true },
       {
         isReconciled: false,
-        feedbackItem: { batch: { type: 'REGULAR', isDoubleScored: false } },
+        feedbackItem: { batch: INDEPENDENT_BATCH_WHERE },
       },
     ],
   }
 }
 
+/**
+ * On an independent (non-double-scored REGULAR) batch there is no reconciled
+ * row, so a raw score is "the" final — but only the one written by the scorer
+ * the release expects for that item: the team member whose slot the item is in
+ * (or the single named scorer), on a criterion their team owns. Any other raw
+ * row on such an item — an admin trying the scoring UI, a partner scoring
+ * outside their slot — is not a final and must not leak into the export; before
+ * this filter whichever row the database returned last won.
+ *
+ * Built from the batches' assignments, items and the project rubric via the
+ * same predicate the Overview count uses (createExpectedScoreFilter).
+ */
+async function loadIndependentFinalFilter(
+  scope: ExportScope
+): Promise<(score: RawScoreForStats) => boolean> {
+  const batchWhere: Prisma.BatchWhereInput = {
+    projectId: scope.projectId,
+    ...INDEPENDENT_BATCH_WHERE,
+  }
+  const [assignments, items, dimensions] = await Promise.all([
+    prisma.batchAssignment.findMany({
+      where: { batch: batchWhere },
+      select: {
+        userId: true,
+        teamRelease: {
+          select: {
+            id: true,
+            scorerUserId: true,
+            team: {
+              select: {
+                members: {
+                  select: { userId: true },
+                  orderBy: { user: { email: 'asc' } },
+                },
+                dimensions: { select: { dimensionId: true } },
+              },
+            },
+          },
+        },
+        batch: { select: { id: true, projectId: true, isDoubleScored: true, type: true } },
+      },
+    }),
+    prisma.feedbackItem.findMany({
+      where: { ...itemFilterWhere(scope), batch: { is: batchWhere } },
+      select: { id: true, batchId: true, slotIndex: true },
+    }),
+    prisma.rubricDimension.findMany({
+      where: { projectId: scope.projectId },
+      select: { id: true },
+    }),
+  ])
+  return createExpectedScoreFilter(
+    assignments,
+    new Map([[scope.projectId, dimensions.map((d) => d.id)]]),
+    items
+  )
+}
+
+interface FinalCandidate extends RawScoreForStats {
+  isReconciled: boolean
+}
+
+/** Reconciled rows always qualify; raw rows only from the expected scorer. */
+function keepFinals<T extends FinalCandidate>(
+  scores: T[],
+  isExpectedRaw: (score: RawScoreForStats) => boolean
+): T[] {
+  return scores.filter((score) => score.isReconciled || isExpectedRaw(score))
+}
+
 // ---------------------------------------------------------------------------
 // Scorer-grain (raw-by-scorer / final-by-scorer)
-//
-// Unchanged from the original implementation — same rows, same columns, same
-// ordering — so anything built on these exports keeps working.
 // ---------------------------------------------------------------------------
 
 async function loadScorerLookups(projectId: string) {
@@ -124,7 +208,27 @@ async function loadScorerLookups(projectId: string) {
       where: { team: { projectId } },
       include: { team: { select: { name: true } } },
     }),
-    prisma.batchAssignment.findMany({ where: { batch: { projectId } } }),
+    prisma.batchAssignment.findMany({
+      where: { batch: { projectId } },
+      select: {
+        batchId: true,
+        userId: true,
+        scoringRole: true,
+        batch: { select: { type: true, isDoubleScored: true } },
+        teamRelease: {
+          select: {
+            team: {
+              select: {
+                members: {
+                  select: { userId: true },
+                  orderBy: { user: { email: 'asc' } },
+                },
+              },
+            },
+          },
+        },
+      },
+    }),
   ])
 
   const teamByUserId = new Map<string, string>()
@@ -132,18 +236,23 @@ async function loadScorerLookups(projectId: string) {
 
   const roleByBatchUser = new Map<string, string>()
   for (const ba of batchAssignments) {
-    roleByBatchUser.set(`${ba.batchId}::${ba.userId}`, ba.scoringRole)
+    const memberIndex = ba.teamRelease
+      ? ba.teamRelease.team.members.findIndex((m) => m.userId === ba.userId)
+      : null
+    roleByBatchUser.set(
+      `${ba.batchId}::${ba.userId}`,
+      scoringRoleLabel({
+        scoringRole: ba.scoringRole,
+        isPaired: ba.batch.type === 'TRAINING' || ba.batch.isDoubleScored,
+        memberIndex,
+      })
+    )
   }
 
   return { teamByUserId, roleByBatchUser }
 }
 
-async function buildScorerGrainCsv(
-  kind: ExportKind,
-  scope: ExportScope,
-  dimensionKeys: string[],
-  dimensionLabels: string[]
-) {
+async function loadScorerGrainScores(kind: ExportKind, scope: ExportScope) {
   const scores = await prisma.score.findMany({
     where: {
       feedbackItem: itemFilterWhere(scope),
@@ -173,8 +282,20 @@ async function buildScorerGrainCsv(
     },
     orderBy: [{ feedbackItemId: 'asc' }, { userId: 'asc' }],
   })
+  if (!usesFinalScores(kind)) return scores
+  return keepFinals(scores, await loadIndependentFinalFilter(scope))
+}
 
-  const lookups = await loadScorerLookups(scope.projectId)
+async function buildScorerGrainCsv(
+  kind: ExportKind,
+  scope: ExportScope,
+  dimensionKeys: string[],
+  dimensionLabels: string[]
+) {
+  const [scores, lookups] = await Promise.all([
+    loadScorerGrainScores(kind, scope),
+    loadScorerLookups(scope.projectId),
+  ])
 
   const rows = buildScorerGrainRows(
     scores.map((score) => ({
@@ -205,7 +326,7 @@ async function buildScorerGrainCsv(
 async function loadItemGrainRows(scope: ExportScope, dimensionKeys: string[]) {
   const where = itemGrainWhere(scope)
 
-  const [items, scores] = await Promise.all([
+  const [items, candidates, isExpectedRaw] = await Promise.all([
     prisma.feedbackItem.findMany({
       where,
       select: {
@@ -224,7 +345,6 @@ async function loadItemGrainRows(scope: ExportScope, dimensionKeys: string[]) {
         feedbackId: true,
         batch: { select: { name: true, type: true, isDoubleScored: true } },
       },
-      orderBy: { feedbackId: 'asc' },
     }),
     prisma.score.findMany({
       where: {
@@ -233,72 +353,120 @@ async function loadItemGrainRows(scope: ExportScope, dimensionKeys: string[]) {
       },
       select: {
         feedbackItemId: true,
+        userId: true,
+        dimensionId: true,
+        isReconciled: true,
         value: true,
         dimension: { select: { key: true } },
       },
+      // Deterministic input order so a conflict's listed values are stable.
+      orderBy: [{ feedbackItemId: 'asc' }, { dimensionId: 'asc' }, { userId: 'asc' }],
     }),
+    loadIndependentFinalFilter(scope),
   ])
 
-  const rows = buildItemGrainRows(
+  // buildItemGrainRows orders rows by numeric Feedback_ID itself.
+  const { rows, conflicts } = buildItemGrainRows(
     items.map((item) => ({
       feedbackItemId: item.id,
       item: toItemFields(item),
       batch: toBatchFields(item.batch),
     })),
-    scores.map((score) => ({
+    keepFinals(candidates, isExpectedRaw).map((score) => ({
       feedbackItemId: score.feedbackItemId,
       dimensionKey: score.dimension.key,
       value: score.value,
     }))
   )
 
-  return scope.completeItemsOnly
-    ? rows.filter((row) => hasFullScoreSet(row, dimensionKeys))
-    : rows
+  return {
+    rows: scope.completeItemsOnly
+      ? rows.filter((row) => hasFullScoreSet(row, dimensionKeys))
+      : rows,
+    conflicts,
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Public entry points
 // ---------------------------------------------------------------------------
 
+export interface ExportCsv {
+  header: string[]
+  rows: string[][]
+  /**
+   * (item × criterion) cells left blank because more than one distinct final
+   * candidate existed. Only the item-grain export collapses cells, so this is
+   * empty for the scorer-grain kinds.
+   */
+  conflicts: ItemGrainConflict[]
+}
+
 export async function buildExportCsv(
   kind: ExportKind,
   scope: ExportScope,
   dimensionKeys: string[],
   dimensionLabels: string[]
-): Promise<{ header: string[]; rows: string[][] }> {
+): Promise<ExportCsv> {
   if (isItemGrain(kind)) {
-    const rows = await loadItemGrainRows(scope, dimensionKeys)
+    const { rows, conflicts } = await loadItemGrainRows(scope, dimensionKeys)
     return {
       header: itemGrainHeader(dimensionLabels),
       rows: rows.map((row) => itemGrainCells(row, dimensionKeys)),
+      conflicts,
     }
   }
-  return buildScorerGrainCsv(kind, scope, dimensionKeys, dimensionLabels)
+  const { header, rows } = await buildScorerGrainCsv(
+    kind,
+    scope,
+    dimensionKeys,
+    dimensionLabels
+  )
+  return { header, rows, conflicts: [] }
 }
 
 /**
  * Row count for the current selection, so the Export tab can say what the file
- * will contain before it is downloaded.
+ * will contain before it is downloaded. `conflictCount` is the number of cells
+ * the item-grain file will leave blank because the finals disagreed.
  */
 export async function countExportRows(
   kind: ExportKind,
   scope: ExportScope,
   dimensionKeys: string[]
-): Promise<number> {
+): Promise<{ rowCount: number; conflictCount: number }> {
   if (isItemGrain(kind)) {
-    return (await loadItemGrainRows(scope, dimensionKeys)).length
+    const { rows, conflicts } = await loadItemGrainRows(scope, dimensionKeys)
+    return { rowCount: rows.length, conflictCount: conflicts.length }
   }
 
   // Scorer grain: one row per distinct (item × scorer) pair.
-  const pairs = await prisma.score.groupBy({
-    by: ['feedbackItemId', 'userId'],
-    where: {
-      feedbackItem: itemFilterWhere(scope),
-      ...scoreSelectorWhere(kind),
-    },
-  })
-  return pairs.length
+  if (!usesFinalScores(kind)) {
+    const pairs = await prisma.score.groupBy({
+      by: ['feedbackItemId', 'userId'],
+      where: {
+        feedbackItem: itemFilterWhere(scope),
+        ...scoreSelectorWhere(kind),
+      },
+    })
+    return { rowCount: pairs.length, conflictCount: 0 }
+  }
+
+  // Final kinds need the expected-scorer filter, which a groupBy can't express.
+  const [candidates, isExpectedRaw] = await Promise.all([
+    prisma.score.findMany({
+      where: {
+        feedbackItem: itemFilterWhere(scope),
+        ...scoreSelectorWhere(kind),
+      },
+      select: { feedbackItemId: true, userId: true, dimensionId: true, isReconciled: true },
+    }),
+    loadIndependentFinalFilter(scope),
+  ])
+  const pairs = new Set(
+    keepFinals(candidates, isExpectedRaw).map((s) => `${s.feedbackItemId}::${s.userId}`)
+  )
+  return { rowCount: pairs.size, conflictCount: 0 }
 }
 
 // ---------------------------------------------------------------------------
