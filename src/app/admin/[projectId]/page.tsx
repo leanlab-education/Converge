@@ -1,7 +1,7 @@
 import { auth } from '@/lib/auth'
 import { redirect, notFound } from 'next/navigation'
 import { prisma } from '@/lib/db'
-import { countForAssignment, loadSlotMaps } from '@/lib/evaluator-stats'
+import { loadAdminProjectStats } from '@/lib/evaluator-stats'
 import { ProjectDetailClient } from '@/components/project-detail-client'
 import { canAdminProject } from '@/lib/authorization'
 
@@ -20,8 +20,10 @@ export default async function ProjectDetailPage({
 
   const { tab } = await searchParams
 
-  // Fetch all data in parallel
-  const [project, evaluatorsRaw, scoredItems, feedbackItemsResult, feedbackItemsCount, unassignedCount, allItemsForFilters] = await Promise.all([
+  // Fetch all data in parallel. Scoring progress (the Overview's "Scored"
+  // count and each annotator's Assigned/Completed) comes from the one shared
+  // loader the evaluators and stats routes also use, so the tabs agree.
+  const [project, evaluatorsRaw, stats, feedbackItemsResult, feedbackItemsCount, unassignedCount, allItemsForFilters] = await Promise.all([
     prisma.project.findUnique({
       where: { id: projectId },
       include: {
@@ -41,14 +43,7 @@ export default async function ProjectDetailPage({
       },
       orderBy: { createdAt: 'asc' },
     }),
-    prisma.score.findMany({
-      where: {
-        feedbackItem: { projectId },
-        isReconciled: false,
-      },
-      select: { feedbackItemId: true },
-      distinct: ['feedbackItemId'],
-    }),
+    loadAdminProjectStats(projectId),
     prisma.feedbackItem.findMany({
       where: { projectId },
       select: {
@@ -98,54 +93,6 @@ export default async function ProjectDetailPage({
 
   if (!project) notFound()
 
-  // Compute slot-adjusted assigned + completed counts per evaluator. Completed
-  // only counts items the user has scored on every criterion they owe on that
-  // batch (a half-scored item does not count).
-  const allBatchAssignments = await prisma.batchAssignment.findMany({
-    where: { batch: { projectId } },
-    include: {
-      teamRelease: {
-        include: {
-          team: {
-            include: {
-              members: {
-                select: { userId: true },
-                orderBy: { user: { email: 'asc' } },
-              },
-              dimensions: {
-                select: { dimensionId: true },
-              },
-            },
-          },
-        },
-      },
-      batch: { select: { id: true, projectId: true, isDoubleScored: true, type: true } },
-    },
-  })
-
-  const basByUser = new Map<string, typeof allBatchAssignments>()
-  for (const ba of allBatchAssignments) {
-    const list = basByUser.get(ba.userId) ?? []
-    list.push(ba)
-    basByUser.set(ba.userId, list)
-  }
-
-  const { itemCountByBatchSlot, scoredCountByUser } = await loadSlotMaps(allBatchAssignments)
-
-  const assignedByUser = new Map<string, number>()
-  const completedByUser = new Map<string, number>()
-  for (const [userId, bas] of basByUser) {
-    const scoredMap = scoredCountByUser.get(userId) ?? new Map()
-    let assigned = 0
-    let completed = 0
-    for (const ba of bas) {
-      assigned += countForAssignment(ba, userId, itemCountByBatchSlot)
-      completed += countForAssignment(ba, userId, scoredMap)
-    }
-    assignedByUser.set(userId, assigned)
-    completedByUser.set(userId, completed)
-  }
-
   const latestScores = await prisma.score.findMany({
     where: { feedbackItem: { batch: { projectId } } },
     select: { userId: true, scoredAt: true },
@@ -163,15 +110,18 @@ export default async function ProjectDetailPage({
   })
   const teamByUser = new Map(teamMemberships.map((m) => [m.userId, m.team]))
 
-  const evaluators = evaluatorsRaw.map((ev) => ({
-    id: ev.id,
-    user: ev.user,
-    role: ev.role,
-    assignedCount: assignedByUser.get(ev.user.id) ?? 0,
-    completedCount: completedByUser.get(ev.user.id) ?? 0,
-    lastScoredAt: lastScoredByUser.get(ev.user.id) ?? null,
-    team: teamByUser.get(ev.user.id) ?? null,
-  }))
+  const evaluators = evaluatorsRaw.map((ev) => {
+    const progress = stats.progressByUser.get(ev.user.id)
+    return {
+      id: ev.id,
+      user: ev.user,
+      role: ev.role,
+      assignedCount: progress?.assignedCount ?? 0,
+      completedCount: progress?.completedCount ?? 0,
+      lastScoredAt: lastScoredByUser.get(ev.user.id) ?? null,
+      team: teamByUser.get(ev.user.id) ?? null,
+    }
+  })
 
   // Serialize dates for client component
   const serializedProject = {
@@ -184,7 +134,7 @@ export default async function ProjectDetailPage({
     <ProjectDetailClient
       initialProject={serializedProject}
       initialEvaluators={evaluators}
-      initialScoredItemCount={scoredItems.length}
+      initialScoredItemCount={stats.fullyScoredItemCount}
       initialFeedbackItemsData={initialFeedbackItemsData}
       initialActiveTab={tab === 'batches' ? 'batches' : 'overview'}
     />

@@ -253,9 +253,15 @@ export function BatchCreator({
       })
       if (response.ok) {
         await onBatchesChange()
+      } else {
+        // The server refuses to delete e.g. a batch that already has scores;
+        // without this the click silently did nothing.
+        const payload = await response.json().catch(() => null)
+        alert(payload?.error || 'Failed to delete batch')
       }
     } catch (error) {
       console.error('Failed to delete batch:', error)
+      alert('Something went wrong while deleting the batch.')
     }
   }
 
@@ -290,11 +296,17 @@ export function BatchCreator({
       if (response.ok) {
         await onBatchesChange({ silent: true })
       } else {
+        // Snap the optimistic update back AND say why — the server's reasons
+        // ("adjudicator cannot be a team member", locked batch) are the whole
+        // point of the refusal.
+        const payload = await response.json().catch(() => null)
         setLocalBatches(previousBatches)
+        alert(payload?.error || 'Failed to update team release')
       }
     } catch (error) {
       setLocalBatches(previousBatches)
       console.error('Failed to update team release:', error)
+      alert('Something went wrong while updating the team release.')
     }
   }
 
@@ -333,6 +345,7 @@ export function BatchCreator({
       }
     } catch (error) {
       console.error('Failed to toggle criterion unlock:', error)
+      window.alert('Something went wrong while updating the re-open state.')
     }
   }
 

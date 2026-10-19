@@ -10,6 +10,7 @@ import {
   syncBatchAssignmentsForRelease,
 } from '@/lib/team-batch-releases'
 import { assignBatchSlots } from '@/lib/batch-slots'
+import type { Prisma } from '@/generated/prisma/client'
 import { NextRequest, NextResponse } from 'next/server'
 
 interface BatchRangeInput {
@@ -25,6 +26,48 @@ interface IndexedItem {
   conjunctionId: string | null
 }
 
+type BatchTx = Pick<Prisma.TransactionClient, 'batch' | 'feedbackItem'>
+
+/** Thrown inside the creation transaction; the route turns it into a 409. */
+class BatchItemConflictError extends Error {}
+
+/**
+ * The next free sortOrder for a new batch: max(sortOrder) + 1, not the batch
+ * count. After a batch is deleted the count drops, so count-based numbering
+ * would hand the next batch an existing batch's sortOrder (unstable list order)
+ * and, since the default name is derived from it, an existing batch's name —
+ * which then appears in every export.
+ */
+async function nextBatchSortOrder(tx: BatchTx, projectId: string): Promise<number> {
+  const { _max } = await tx.batch.aggregate({
+    where: { projectId },
+    _max: { sortOrder: true },
+  })
+  return (_max.sortOrder ?? -1) + 1
+}
+
+/**
+ * Move `itemIds` into `batchId`, refusing to steal an item that is already in
+ * another batch (or that isn't in this project). Runs inside the batch-creation
+ * transaction so a mismatch rolls the whole batch back.
+ */
+async function claimItemsForBatch(
+  tx: BatchTx,
+  projectId: string,
+  batchId: string,
+  itemIds: string[]
+) {
+  const { count } = await tx.feedbackItem.updateMany({
+    where: { id: { in: itemIds }, projectId, batchId: null },
+    data: { batchId },
+  })
+  if (count !== itemIds.length) {
+    throw new BatchItemConflictError(
+      `${itemIds.length - count} of the ${itemIds.length} selected items are already in another batch or not in this project. No batch was created.`
+    )
+  }
+}
+
 // GET /api/projects/[projectId]/batches — list batches with stats
 export async function GET(
   _request: NextRequest,
@@ -37,13 +80,11 @@ export async function GET(
 
   const { projectId } = await params
 
+  // Admin-only, like every sibling route: this payload includes hidden batches,
+  // unreleased team releases, every assignee's email, per-team IRR, adjudicator
+  // and lock state. Annotators get their view from the project page, not here.
   if (!(await canAdminProject(session.user.id, session.user.role, projectId))) {
-    const membership = await prisma.projectEvaluator.findUnique({
-      where: { projectId_userId: { projectId, userId: session.user.id } },
-    })
-    if (!membership) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
-    }
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
   const batches = await prisma.batch.findMany({
@@ -386,8 +427,7 @@ export async function POST(
     Array.isArray(trainingItemIds) &&
     trainingItemIds.length > 0
   ) {
-    const sortOrder = await prisma.batch.count({ where: { projectId } })
-    const batchName = `Training Batch ${sortOrder + 1}`
+    const uniqueTrainingItemIds = Array.from(new Set(trainingItemIds))
 
     const teams = await prisma.evaluatorTeam.findMany({
       where: { projectId },
@@ -403,35 +443,45 @@ export async function POST(
     // Atomic core (P8): the batch, its item migration, and its team releases
     // commit together so a partial failure can't orphan a half-wired batch.
     // Assignment + display-order wiring runs after commit (idempotent).
-    const { batch, releaseIds } = await prisma.$transaction(async (tx) => {
-      const created = await tx.batch.create({
-        data: {
-          projectId,
-          name: batchName,
-          type: 'TRAINING',
-          status: visibleToTeams ? 'SCORING' : 'DRAFT',
-          size: trainingItemIds.length,
-          sortOrder,
-        },
-      })
-      await tx.feedbackItem.updateMany({
-        where: { id: { in: trainingItemIds }, projectId },
-        data: { batchId: created.id },
-      })
-      const releaseIds: string[] = []
-      for (const team of teams) {
-        const release = await tx.teamBatchRelease.create({
+    let batch: { id: string; name: string }
+    let releaseIds: string[]
+    try {
+      ;({ batch, releaseIds } = await prisma.$transaction(async (tx) => {
+        const sortOrder = await nextBatchSortOrder(tx, projectId)
+        const created = await tx.batch.create({
           data: {
-            batchId: created.id,
-            teamId: team.id,
-            isVisible: visibleToTeams,
-            scorerUserId: null,
+            projectId,
+            name: `Training Batch ${sortOrder + 1}`,
+            type: 'TRAINING',
+            status: visibleToTeams ? 'SCORING' : 'DRAFT',
+            size: uniqueTrainingItemIds.length,
+            sortOrder,
           },
         })
-        releaseIds.push(release.id)
+        await claimItemsForBatch(tx, projectId, created.id, uniqueTrainingItemIds)
+        const releaseIds: string[] = []
+        for (const team of teams) {
+          const release = await tx.teamBatchRelease.create({
+            data: {
+              batchId: created.id,
+              teamId: team.id,
+              isVisible: visibleToTeams,
+              // Same as the range path: a visible release is SCORING, a hidden
+              // one DRAFT. Without this a visible release defaulted to DRAFT.
+              status: visibleToTeams ? 'SCORING' : 'DRAFT',
+              scorerUserId: null,
+            },
+          })
+          releaseIds.push(release.id)
+        }
+        return { batch: created, releaseIds }
+      }))
+    } catch (error) {
+      if (error instanceof BatchItemConflictError) {
+        return NextResponse.json({ error: error.message }, { status: 409 })
       }
-      return { batch: created, releaseIds }
-    })
+      throw error
+    }
 
     for (const releaseId of releaseIds) {
       await syncBatchAssignmentsForRelease(releaseId)
@@ -442,7 +492,7 @@ export async function POST(
     }
 
     return NextResponse.json(
-      { id: batch.id, name: batchName, itemCount: trainingItemIds.length, type },
+      { id: batch.id, name: batch.name, itemCount: uniqueTrainingItemIds.length, type },
       { status: 201 }
     )
   }
@@ -589,9 +639,6 @@ export async function POST(
   const inferredActivityId = inferSharedValue(selectedItems, 'activityId')
   const inferredConjunctionId = inferSharedValue(selectedItems, 'conjunctionId')
 
-  const sortOrder = await prisma.batch.count({ where: { projectId } })
-  const name = `Batch ${sortOrder + 1}`
-
   const teams =
     type === 'REGULAR' || type === 'TRAINING'
       ? await prisma.evaluatorTeam.findMany({
@@ -608,42 +655,51 @@ export async function POST(
 
   // Atomic core (P8): batch + item migration + ranges + team releases commit
   // together. Slot/assignment/display-order wiring runs after commit; those
-  // helpers are idempotent and re-derive from the committed rows.
-  const { batch, releaseIds } = await prisma.$transaction(async (tx) => {
-    const created = await tx.batch.create({
-      data: {
-        projectId,
-        name,
-        activityId: activityId || inferredActivityId,
-        conjunctionId: conjunctionId || inferredConjunctionId,
-        type,
-        isDoubleScored,
-        status: visibleToTeams ? 'SCORING' : 'DRAFT',
-        size: selectedItems.length,
-        sortOrder,
-        ranges: { create: rangesToCreate },
-      },
-    })
-    await tx.feedbackItem.updateMany({
-      where: { id: { in: Array.from(selectedItemIds) } },
-      data: { batchId: created.id },
-    })
-    const releaseIds: string[] = []
-    for (const team of teams) {
-      const release = await tx.teamBatchRelease.create({
+  // helpers are idempotent and re-derive from the committed rows. The items
+  // were checked unbatched above, but the claim re-checks inside the
+  // transaction so a concurrent batch creation can't take the same items.
+  let batch: { id: string; name: string }
+  let releaseIds: string[]
+  try {
+    ;({ batch, releaseIds } = await prisma.$transaction(async (tx) => {
+      const sortOrder = await nextBatchSortOrder(tx, projectId)
+      const created = await tx.batch.create({
         data: {
-          batchId: created.id,
-          teamId: team.id,
-          isVisible: visibleToTeams,
+          projectId,
+          name: `Batch ${sortOrder + 1}`,
+          activityId: activityId || inferredActivityId,
+          conjunctionId: conjunctionId || inferredConjunctionId,
+          type,
+          isDoubleScored,
           status: visibleToTeams ? 'SCORING' : 'DRAFT',
-          // scorerUserId is set later (single-scorer feature); split is default.
-          scorerUserId: null,
+          size: selectedItems.length,
+          sortOrder,
+          ranges: { create: rangesToCreate },
         },
       })
-      releaseIds.push(release.id)
+      await claimItemsForBatch(tx, projectId, created.id, Array.from(selectedItemIds))
+      const releaseIds: string[] = []
+      for (const team of teams) {
+        const release = await tx.teamBatchRelease.create({
+          data: {
+            batchId: created.id,
+            teamId: team.id,
+            isVisible: visibleToTeams,
+            status: visibleToTeams ? 'SCORING' : 'DRAFT',
+            // scorerUserId is set later (single-scorer feature); split is default.
+            scorerUserId: null,
+          },
+        })
+        releaseIds.push(release.id)
+      }
+      return { batch: created, releaseIds }
+    }))
+  } catch (error) {
+    if (error instanceof BatchItemConflictError) {
+      return NextResponse.json({ error: error.message }, { status: 409 })
     }
-    return { batch: created, releaseIds }
-  })
+    throw error
+  }
 
   // Non-double-scored regular: shuffle items into slots A/B (one shuffle,
   // consistent across all team releases). Double-scored/training don't use slots.
@@ -661,7 +717,7 @@ export async function POST(
   return NextResponse.json(
     {
       id: batch.id,
-      name,
+      name: batch.name,
       itemCount: selectedItems.length,
       type,
       isDoubleScored,
@@ -732,7 +788,7 @@ async function handleAutoMode(
   }
 
   const createdBatches: { id: string; name: string; itemCount: number }[] = []
-  let sortOrder = await prisma.batch.count({ where: { projectId } })
+  let sortOrder = await nextBatchSortOrder(prisma, projectId)
 
   for (const [key, groupItems] of groups) {
     const [activityId, conjunctionId] = key.split('::')
@@ -761,10 +817,12 @@ async function handleAutoMode(
             sortOrder: sortOrder++,
           },
         })
-        await tx.feedbackItem.updateMany({
-          where: { id: { in: chunk.map((item) => item.id) } },
-          data: { batchId: created.id },
-        })
+        await claimItemsForBatch(
+          tx,
+          projectId,
+          created.id,
+          chunk.map((item) => item.id)
+        )
         return created
       })
 
