@@ -16,6 +16,13 @@ Purpose: validate that the platform's measured annotator time is accurate enough
 
 **Expected variance:** measured time may be **up to ~20 seconds short** of stopwatch on any single test (heartbeats fire every 20s, so the tail of a session can be lost). Don't sweat sub-minute differences. **More than 10% off is the threshold worth flagging.**
 
+**How time is booked (the rules the tests below check):**
+- A session is open while the tab is visible and there has been mouse/keyboard/scroll input in the last 5 minutes. The browser sends a heartbeat every 20s.
+- A session can never be booked more than **~30 seconds past its last heartbeat** (one heartbeat interval plus grace). Closing the laptop lid, or a frozen tab, therefore adds at most ~30s — never the whole gap.
+- When the tab goes idle (5 minutes with no input), the session is booked back to the **last input event**, so the idle minutes themselves don't count. Tracking resumes on the first mouse move / key press after the pause.
+- "Annotating" covers every page where review work happens: scoring (`/evaluate`), pair reconciliation (`/reconcile`), adjudication (`/adjudicate`) and re-opened-criterion revision (`/revise`). Everything else authenticated is "Other".
+- Two tabs open at once never double-count: overlapping time is merged per bucket.
+
 ---
 
 ## Test 1 — Basic annotation accuracy (10 min)
@@ -24,7 +31,7 @@ Purpose: validate that the platform's measured annotator time is accurate enough
 
 1. Annotator: log in, navigate to a batch's evaluate page, start the stopwatch.
 2. Score items continuously for **10 minutes**. Move the mouse / type normally.
-3. Stop the stopwatch when 10:00 is up. Click somewhere outside `/evaluate/*` (e.g. back to "My Projects") so the session closes cleanly.
+3. Stop the stopwatch when 10:00 is up. Click somewhere outside the annotation interface (e.g. back to "My Projects") so the session closes cleanly.
 4. Observer: switch period to **This week**, refresh, note the new Time value.
 
 **Expected:** new Time minus baseline ≈ **10:00 ± 30 seconds**. Hover the Time cell — the tooltip should show essentially all of it under "Annotating", with "Other" near 0.
@@ -38,7 +45,7 @@ Purpose: validate that the platform's measured annotator time is accurate enough
 **Goal:** time on the rest of the platform (dashboard, batches view, etc.) lands in the "Other" bucket, not "Annotating".
 
 1. Annotator: log in but **don't enter the annotation interface**. Start stopwatch.
-2. Spend **5 minutes** clicking around the dashboard / batch list / project view. Don't enter any `/evaluate/*` page.
+2. Spend **5 minutes** clicking around the dashboard / batch list / project view. Don't open any annotation page (`/evaluate`, `/reconcile`, `/adjudicate`, `/revise`) — those all count as Annotating.
 3. Log out.
 4. Observer: refresh the Time cell. Hover for the tooltip.
 
@@ -62,7 +69,7 @@ Purpose: validate that the platform's measured annotator time is accurate enough
 
 **Fails if:** measured time is closer to 12 min than 4 min — that means idle isn't being detected.
 
-**Note:** the idle threshold is 5 minutes of no input. So scoring → 5 min idle → resume should count as "active for first ~5 min, paused, active again". An 8-minute idle gap definitively triggers idle pause.
+**Note:** the idle threshold is 5 minutes of no input. Once the tab is declared idle, the session is booked back to the **last input event**, so none of the 8 idle minutes count — not even the first 5. Tracking resumes on the first mouse move / key press, so the second 2-minute block starts counting right away. Expect ~4:00, with the usual ±20s per session boundary.
 
 ---
 
@@ -127,7 +134,7 @@ Purpose: validate that the platform's measured annotator time is accurate enough
 2. Throughout, keep an honest mental note of how much was *active scoring* vs *active dashboard* vs *break*. Write those down at the end.
 3. Observer: pull up the Time cell tooltip after the session.
 
-**Expected:** measured "Annotating" + "Other" is within **±10% of (wall time − break time)**. Annotating share roughly matches your mental note.
+**Expected:** measured "Annotating" + "Other" is within **±10% of (wall time − break time)**. Annotating share roughly matches your mental note. A closed-lid break adds at most ~30 seconds (the session is capped one heartbeat past its last one); a walk-away break with the tab visible is cut back to your last input once the 5-minute idle threshold passes.
 
 **Fails if:** off by more than 15%, or the annotation/other split feels obviously wrong.
 
@@ -146,18 +153,46 @@ This is the test that most resembles real billing-verification use.
 
 ---
 
-## Test 9 — Browser crash / force-close (optional, slow — 10 min)
+## Test 9 — Browser crash / force-close (optional — 8 min)
 
-**Goal:** if the browser dies without a clean logout, the session still closes within ~5 minutes via the server sweep.
+**Goal:** if the browser dies without a clean logout, the orphaned session is closed by the server and booked through its last heartbeat — no more, no less.
+
+The server closes any session whose last heartbeat is more than 2 minutes old in two places: the moment that annotator is next active *anywhere* on the platform (their first heartbeat sweeps their own stale sessions), and a daily backstop sweep at 04:00 UTC.
 
 1. Annotator: open the evaluate page, score for **2 minutes**, then **force-quit the browser** (Cmd+Q, kill from Activity Monitor, etc.) — no clean logout.
-2. **Wait 5–7 minutes** without doing anything else.
-3. Annotator: log back in, go to dashboard.
+2. **Wait at least 3 minutes** without doing anything else.
+3. Annotator: log back in, go to the dashboard (that first page load is what closes the orphan).
 4. Observer: refresh the Time cell.
 
-**Expected:** the 2-minute session shows up. (Without the sweep, it would either be missing or eventually count time until the next heartbeat — which never came.)
+**Expected:** the 2-minute session shows up at ~2:00 ± 20s — it must not keep growing while the browser was dead, and it must not be missing.
 
-This one's a long tail and not the most important — skip on a first pass.
+---
+
+## Test 10 — Laptop sleep with the tab open (optional — 15 min)
+
+**Goal:** closing the lid doesn't book the sleep as work.
+
+1. Annotator: open the evaluate page, start stopwatch, score for **2 minutes**.
+2. **Close the laptop lid** (or sleep the machine) for **10 minutes**. Leave the tab open.
+3. Open it, score for **1 more minute**, then click back to "My Projects".
+4. Observer: refresh the Time cell.
+
+**Expected:** ~**3 minutes ± 1 minute**, NOT 13. The pre-sleep session is capped ~30 seconds past its last heartbeat regardless of when the browser wakes up and reports it.
+
+**Fails if:** closer to 13 min — the end-of-session clamp isn't working.
+
+---
+
+## Test 11 — Reconciliation counts as Annotating (5 min)
+
+**Goal:** paid review work outside the scoring screen lands in "Annotating", not "Other".
+
+1. Annotator (one who has a reconciliation or revision task): start stopwatch, open the reconcile page and work on discrepancies for **3 minutes**. Then go back to the dashboard for **1 minute**.
+2. Observer: refresh, hover the tooltip.
+
+**Expected:** "Annotating" up by **~3 min**, "Other" up by **~1 min**.
+
+**Fails if:** the reconcile minutes show under "Other".
 
 ---
 

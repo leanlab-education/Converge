@@ -1,7 +1,7 @@
 import { auth } from '@/lib/auth'
 import { canAdminProject } from '@/lib/authorization'
 import { prisma } from '@/lib/db'
-import { periodRange, type Period } from '@/lib/activity-tracker-config'
+import { parsePeriodQuery } from '@/lib/activity-tracker-config'
 import { NextRequest, NextResponse } from 'next/server'
 
 export async function GET(
@@ -18,33 +18,12 @@ export async function GET(
   if (!(await canAdminProject(session.user.id, session.user.role, projectId))) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
-  const { searchParams } = new URL(request.url)
-  const periodParam = searchParams.get('period') ?? 'month'
-  if (
-    periodParam !== 'week' &&
-    periodParam !== 'month' &&
-    periodParam !== 'all' &&
-    periodParam !== 'custom'
-  ) {
-    return NextResponse.json({ error: 'Invalid period' }, { status: 400 })
-  }
-  const period = periodParam as Period
 
-  const fromParam = searchParams.get('from')
-  const toParam = searchParams.get('to')
-
-  let range
-  try {
-    range = periodRange(period, {
-      from: fromParam ? new Date(fromParam) : undefined,
-      to: toParam ? new Date(toParam) : undefined,
-    })
-  } catch (e) {
-    return NextResponse.json(
-      { error: e instanceof Error ? e.message : 'Invalid range' },
-      { status: 400 }
-    )
+  const parsed = parsePeriodQuery(new URL(request.url).searchParams)
+  if (!parsed.ok) {
+    return NextResponse.json({ error: parsed.error }, { status: 400 })
   }
+  const { period, range } = parsed
 
   const evaluators = await prisma.projectEvaluator.findMany({
     where: { projectId },
