@@ -1,9 +1,11 @@
 import NextAuth, { CredentialsSignin } from 'next-auth'
 import Credentials from 'next-auth/providers/credentials'
 import { compare } from 'bcryptjs'
-import { jwtVerify } from 'jose'
 import { prisma } from './db'
 import { SERVICE_UNAVAILABLE_CODE } from './auth-errors'
+import { normalizeEmail } from './email-address'
+import { verifyStudyFlowToken } from './studyflow-token'
+import { resolveCallbackUrl } from './callback-url'
 
 // Thrown when sign-in fails for a reason that isn't the user's fault (e.g. the
 // database is unreachable or over quota). Auth.js passes `code` through to the
@@ -11,35 +13,6 @@ import { SERVICE_UNAVAILABLE_CODE } from './auth-errors'
 // "Invalid email or password".
 class ServiceUnavailableSignin extends CredentialsSignin {
   code = SERVICE_UNAVAILABLE_CODE
-}
-
-async function verifyStudyFlowToken(token: string, email: string) {
-  const secret = process.env.STUDYFLOW_LINK_SECRET
-  if (!secret) return null
-
-  try {
-    const key = new TextEncoder().encode(secret)
-    const { payload } = await jwtVerify(token, key, {
-      maxTokenAge: '10m', // Reject tokens older than 10 minutes even if exp is far out
-      issuer: 'studyflow',
-      audience: 'writing-evaluator',
-    })
-
-    // Require an expiration claim — reject tokens without one
-    if (!payload.exp) return null
-
-    // Verify email matches
-    if (payload.email !== email) return null
-
-    return {
-      email: payload.email as string,
-      name: payload.name as string | undefined,
-      projectId: payload.project_id as string | undefined,
-      studyId: payload.study_id as string | undefined,
-    }
-  } catch {
-    return null
-  }
 }
 
 type CredentialsInput = Partial<Record<'email' | 'password' | 'studyflow_token', unknown>>
@@ -50,7 +23,7 @@ type CredentialsInput = Partial<Record<'email' | 'password' | 'studyflow_token',
 async function authorizeCredentials(credentials: CredentialsInput) {
   if (!credentials?.email) return null
 
-  const email = (credentials.email as string).trim().toLowerCase()
+  const email = normalizeEmail(credentials.email as string)
 
   // StudyFlow magic link flow
   if (credentials.studyflow_token) {
@@ -60,12 +33,14 @@ async function authorizeCredentials(credentials: CredentialsInput) {
     )
     if (!verified) return null
 
-    // Find or create user
-    let user = await prisma.user.findUnique({ where: { email } })
+    // Find or create user. `verified.email` is the normalized address the
+    // token was issued for — the same value `email` holds once normalized, and
+    // the one every other writer stores.
+    let user = await prisma.user.findUnique({ where: { email: verified.email } })
     if (!user) {
       user = await prisma.user.create({
         data: {
-          email,
+          email: verified.email,
           name: verified.name || null,
           role: 'EVALUATOR',
         },
@@ -141,7 +116,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   callbacks: {
     authorized({ auth, request }) {
       const isLoggedIn = !!auth?.user
-      const { pathname } = request.nextUrl
+      const { pathname, searchParams, origin } = request.nextUrl
       const isPublicPage =
         pathname === '/login' ||
         pathname.startsWith('/invite/') ||
@@ -156,8 +131,20 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         pathname.startsWith('/api/cron/')
 
       if (isPublicApiRoute) return true
+
+      // Someone already signed in has no business on the login page: send them
+      // on to where they were headed (Auth.js appends `callbackUrl` when it
+      // bounces an unauthenticated request here), or home. The one exception
+      // is a StudyFlow launch, which asserts who should be signed in — let the
+      // login page complete it even if another account is signed in on this
+      // browser (shared devices), and let its failure screen show.
       if (pathname === '/login' && isLoggedIn) {
-        return Response.redirect(new URL('/', request.url))
+        const isStudyFlowFlow =
+          searchParams.has('studyflow_token') || searchParams.has('studyflow')
+        if (!isStudyFlowFlow) {
+          const target = resolveCallbackUrl(searchParams.get('callbackUrl'), origin)
+          return Response.redirect(new URL(target, origin))
+        }
       }
       if (!isLoggedIn && !isPublicPage) return false
 

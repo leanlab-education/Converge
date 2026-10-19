@@ -22,6 +22,7 @@ import {
   classifySignInFailure,
   isSignInFailure,
 } from '@/lib/auth-errors'
+import { resolveCallbackUrl } from '@/lib/callback-url'
 
 function LoginForm() {
   const router = useRouter()
@@ -37,6 +38,11 @@ function LoginForm() {
   // Set after a failed StudyFlow launch. Kept in the URL (not state) so a
   // refresh still shows the StudyFlow screen rather than the password form.
   const studyflowFailure = searchParams.get('studyflow')
+  // Where to go after signing in. Auth.js appends this (as an absolute URL)
+  // when it bounces an unauthenticated visitor here; our own pages pass a
+  // relative one (adjudicate/page.tsx). Only same-origin targets are honored;
+  // anything else falls back to "/", which routes each role to its dashboard.
+  const callbackUrlParam = searchParams.get('callbackUrl')
 
   // StudyFlow magic link auto-login
   useEffect(() => {
@@ -51,9 +57,13 @@ function LoginForm() {
       .then((failure) => {
         // Replace (not push) so the token URL is removed from browser history
         // and can't be reused.
-        router.replace(failure ? `/login?studyflow=${failure}` : '/')
+        router.replace(
+          failure
+            ? `/login?studyflow=${failure}`
+            : resolveCallbackUrl(callbackUrlParam, window.location.origin)
+        )
       })
-  }, [studyflowToken, studyflowEmail, router])
+  }, [studyflowToken, studyflowEmail, callbackUrlParam, router])
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -71,7 +81,7 @@ function LoginForm() {
       if (failure) {
         setError(PASSWORD_SIGN_IN_MESSAGES[failure])
       } else {
-        router.push('/')
+        router.push(resolveCallbackUrl(callbackUrlParam, window.location.origin))
       }
     } catch {
       setError(PASSWORD_SIGN_IN_MESSAGES.unavailable)

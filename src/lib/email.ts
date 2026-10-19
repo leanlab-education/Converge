@@ -12,7 +12,12 @@ function getAppUrl() {
   return process.env.APP_URL || 'https://writing-evaluator.vercel.app'
 }
 
-type InviteVariant = 'annotator' | 'admin' | 'project-admin'
+// Which copy an invite gets; chosen by inviteVariant() in invite.ts.
+// 'project-admin' is sent when the invitee's membership on the target project
+// is already PROJECT_ADMIN at invite time — e.g. re-sending the invite after
+// the Annotators tab's "Make Admin" toggle. Promoting an existing member via
+// PATCH /api/projects/[projectId]/evaluators/[userId]/role sends no email.
+export type InviteVariant = 'annotator' | 'admin' | 'project-admin'
 
 export async function sendInviteEmail(
   email: string,
@@ -34,7 +39,7 @@ export async function sendInviteEmail(
     intro = `You've been invited to join Writing Evaluator as an annotator. Click below to set your password and get started.`
   }
 
-  await getResend().emails.send({
+  const { error } = await getResend().emails.send({
     from: FROM_EMAIL,
     to: email,
     subject: 'You\'ve been invited to Writing Evaluator',
@@ -52,6 +57,11 @@ export async function sendInviteEmail(
       </div>
     `,
   })
+
+  // Resend reports failures in the result rather than throwing. Surface them
+  // so the admin never sees "Invitation email sent!" for a message that
+  // wasn't; the invite can be re-sent from the Accounts page.
+  if (error) throw new Error(`Resend failed to send invite email: ${error.message}`)
 }
 
 export async function sendResetEmail(email: string, token: string) {

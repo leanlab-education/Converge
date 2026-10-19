@@ -1,6 +1,7 @@
 import { auth } from '@/lib/auth'
 import { canAdminProject } from '@/lib/authorization'
 import { prisma } from '@/lib/db'
+import { normalizeEmail, parseEmail } from '@/lib/email-address'
 import { fetchStudyFlowParticipants } from '@/lib/studyflow-client'
 import { NextRequest, NextResponse } from 'next/server'
 
@@ -34,7 +35,8 @@ export async function GET(
   try {
     const participants = await fetchStudyFlowParticipants(project.studyflowStudyId)
 
-    // Check which emails already exist as evaluators on this project
+    // Check which emails already exist as evaluators on this project. Stored
+    // addresses are lowercased; StudyFlow's may not be.
     const existingEvaluators = await prisma.projectEvaluator.findMany({
       where: { projectId },
       include: { user: { select: { email: true } } },
@@ -43,14 +45,40 @@ export async function GET(
 
     const result = participants.map((p) => ({
       ...p,
-      alreadyImported: existingEmails.has(p.email),
+      alreadyImported:
+        typeof p.email === 'string' && existingEmails.has(normalizeEmail(p.email)),
     }))
 
     return NextResponse.json(result)
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Failed to fetch participants'
-    return NextResponse.json({ error: message }, { status: 502 })
+    // The upstream error carries StudyFlow's raw response body (and, on a
+    // misconfiguration, the names of our own env vars). That belongs in the
+    // server log, not in the browser.
+    console.error('[import-evaluators] failed to fetch StudyFlow participants', {
+      projectId,
+      error: err,
+    })
+    return NextResponse.json(
+      { error: 'Could not fetch participants from StudyFlow. Please try again in a few minutes.' },
+      { status: 502 }
+    )
   }
+}
+
+function participantName(p: Record<string, unknown>): string | null {
+  const parts = [p.firstName, p.lastName]
+    .filter((v): v is string => typeof v === 'string' && v.trim() !== '')
+    .map((v) => v.trim())
+  return parts.length > 0 ? parts.join(' ') : null
+}
+
+// Human-readable label for a rejected row, so the admin can find it in the
+// StudyFlow roster.
+function describeParticipant(p: Record<string, unknown>, index: number): string {
+  const label =
+    participantName(p) ?? (typeof p.id === 'string' && p.id ? p.id : `row ${index + 1}`)
+  const rawEmail = typeof p.email === 'string' ? p.email.trim() : ''
+  return rawEmail ? `${label} ("${rawEmail}")` : `${label} (no email)`
 }
 
 // POST: import selected participants as evaluators
@@ -68,18 +96,39 @@ export async function POST(
   if (!(await canAdminProject(session.user.id, session.user.role, projectId))) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
-  const { participants } = await request.json()
+
+  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null
+  const participants: unknown = body?.participants
 
   if (!Array.isArray(participants) || participants.length === 0) {
     return NextResponse.json({ error: 'No participants selected' }, { status: 400 })
   }
 
-  let imported = 0
+  // The body is whatever the browser sent back from the preview, so validate
+  // every row before writing anything: one participant without an email must
+  // not leave the import half-applied.
+  const rows: { email: string; name: string | null }[] = []
+  const invalid: string[] = []
+  participants.forEach((raw, index) => {
+    const p = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+    const email = parseEmail(p.email)
+    if (!email) {
+      invalid.push(describeParticipant(p, index))
+      return
+    }
+    rows.push({ email, name: participantName(p) })
+  })
 
-  for (const p of participants) {
-    const email = p.email.trim().toLowerCase()
-    const name = [p.firstName, p.lastName].filter(Boolean).join(' ') || null
+  if (invalid.length > 0) {
+    return NextResponse.json(
+      {
+        error: `${invalid.length} selected participant(s) have no valid email address, so nothing was imported: ${invalid.join(', ')}`,
+      },
+      { status: 400 }
+    )
+  }
 
+  for (const { email, name } of rows) {
     // Find or create user (no password — they'll use StudyFlow magic link)
     let user = await prisma.user.findUnique({ where: { email } })
     if (!user) {
@@ -94,9 +143,10 @@ export async function POST(
       create: { projectId, userId: user.id },
       update: {},
     })
-
-    imported++
   }
 
-  return NextResponse.json({ imported, total: participants.length }, { status: 201 })
+  return NextResponse.json(
+    { imported: rows.length, total: participants.length },
+    { status: 201 }
+  )
 }

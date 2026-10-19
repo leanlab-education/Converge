@@ -382,13 +382,14 @@ export function ProjectDetailClient({
     setAddingEvaluator(true)
 
     try {
-      const res = await fetch('/api/invite', {
+      // Project-scoped so project admins (not only global admins) can add
+      // annotators; the route only ever creates annotator accounts.
+      const res = await fetch(`/api/projects/${projectId}/invite`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           email: evalEmail.trim(),
           name: evalName.trim() || null,
-          projectId,
         }),
       })
 
