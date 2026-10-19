@@ -1,6 +1,10 @@
 import { auth } from '@/lib/auth'
 import { canAdminProject } from '@/lib/authorization'
 import { prisma } from '@/lib/db'
+import {
+  assertProjectDimensions,
+  assertProjectMembers,
+} from '@/lib/project-scope'
 import { syncTeamAcrossBatches } from '@/lib/team-batch-releases'
 import { NextRequest, NextResponse } from 'next/server'
 
@@ -88,6 +92,19 @@ export async function POST(
       { error: 'At least one dimension is required' },
       { status: 400 }
     )
+  }
+
+  // Members and criteria must belong to THIS project (audit H-A2): nothing in
+  // the schema stops another project's annotator or dimension being wired in.
+  const [memberScope, dimensionScope] = await Promise.all([
+    assertProjectMembers(projectId, memberUserIds),
+    assertProjectDimensions(projectId, dimensionIds),
+  ])
+  if (!memberScope.ok) {
+    return NextResponse.json({ error: memberScope.error }, { status: 400 })
+  }
+  if (!dimensionScope.ok) {
+    return NextResponse.json({ error: dimensionScope.error }, { status: 400 })
   }
 
   // Check for duplicate team name
