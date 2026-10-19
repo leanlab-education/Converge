@@ -45,6 +45,13 @@ import {
   isAppropriateFeedbackDecision,
 } from '@/lib/optimal-indicator'
 import { QUILL_FEEDBACK_RUBRIC } from '@/lib/rubric-templates'
+import {
+  ScoreAutosave,
+  buildScorePayload,
+  scoreSnapshot,
+  type AutosaveStatus,
+  type ScoreSavePayload,
+} from '@/lib/score-autosave'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -190,18 +197,36 @@ export function EvaluateClient({
   )
 
   // UI & saving
-  const [saving, setSaving] = useState(false)
-  const [saveStatus, setSaveStatus] = useState<
-    'idle' | 'saving' | 'saved' | 'error'
-  >('idle')
+  const [saving, setSaving] = useState(false) // explicit Continue in progress
+  const [leaving, setLeaving] = useState(false) // flushing before dashboard
+  // Save status per item, so an item whose save failed after the annotator
+  // moved on still reports it when they come back (and in the header).
+  const [statusByItem, setStatusByItem] = useState<
+    Record<string, AutosaveStatus>
+  >({})
 
   // Timing
   const interactedRef = useRef(false)
 
-  // Auto-save
-  const autoSaveTimerRef = useRef<NodeJS.Timeout | null>(null)
-  const lastSavedRef = useRef<string>('') // JSON snapshot to detect changes
-  const saveInProgressRef = useRef(false) // prevent concurrent saves
+  // Auto-save. The scheduler owns the debounce timers and the request queue
+  // (see src/lib/score-autosave.ts for why: Batch 65 / F4287). It lives
+  // outside React's effect lifecycle so navigating away cannot cancel a
+  // pending save, and it re-sends anything changed while a request is out.
+  const persistRef = useRef<
+    (payload: { feedbackItemId: string } & ScoreSavePayload) => Promise<boolean>
+  >(async () => false)
+  const [autosave] = useState(
+    () =>
+      new ScoreAutosave<ScoreSavePayload>({
+        debounceMs: 1000,
+        persist: (itemId, payload) =>
+          persistRef.current({ feedbackItemId: itemId, ...payload }),
+        onStatus: (itemId, status) =>
+          setStatusByItem((prev) =>
+            prev[itemId] === status ? prev : { ...prev, [itemId]: status }
+          ),
+      })
+  )
 
   // ---------------------------------------------------------------------------
   // Fetch data
@@ -325,13 +350,23 @@ export function EvaluateClient({
         // Non-critical — just means we start fresh
       }
 
+      // Tell the scheduler what the server already holds, so merely opening
+      // an already-scored item does not re-send it (which would also re-stamp
+      // its scoredAt).
+      autosave.reset()
+      for (const [itemId, state] of Object.entries(initialScores)) {
+        if (state.scores.some((s) => s.value !== null)) {
+          autosave.markSaved(itemId, scoreSnapshot(state))
+        }
+      }
+
       setItemScores(initialScores)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load data')
     } finally {
       setLoading(false)
     }
-  }, [projectId, batchId, batchType, reviseDimensionId])
+  }, [projectId, batchId, batchType, reviseDimensionId, autosave])
 
   useEffect(() => {
     fetchData()
@@ -363,6 +398,9 @@ export function EvaluateClient({
   // (which allows editing a closed/reconciling batch and only re-derives
   // reconciliation when a value actually changed); otherwise the normal
   // /api/scores upsert. Returns true on success.
+  //
+  // `keepalive` lets a request flushed on beforeunload finish even if the
+  // annotator confirms leaving; a plain fetch is cancelled with the page.
   const persistItemScores = useCallback(
     async (payload: {
       feedbackItemId: string
@@ -376,6 +414,7 @@ export function EvaluateClient({
             fetch(`/api/projects/${projectId}/batches/${batchId}/revise`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
+              keepalive: true,
               body: JSON.stringify({
                 feedbackItemId: payload.feedbackItemId,
                 dimensionId: s.dimensionId,
@@ -390,6 +429,7 @@ export function EvaluateClient({
       const res = await fetch('/api/scores', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
+        keepalive: true,
         body: JSON.stringify({
           feedbackItemId: payload.feedbackItemId,
           scores: payload.scores,
@@ -402,71 +442,80 @@ export function EvaluateClient({
     [reviseDimensionId, batchId, projectId]
   )
 
+  useEffect(() => {
+    persistRef.current = persistItemScores
+  }, [persistItemScores])
+
   // ---------------------------------------------------------------------------
-  // Auto-save: debounced 1s after any score or notes change
+  // Auto-save: hand every local change to the scheduler (1s debounce)
   // ---------------------------------------------------------------------------
 
   useEffect(() => {
     if (!currentItem || !currentScoreState) return
+    // A save carries only scored criteria; with none there is nothing to send.
+    if (!currentScoreState.scores.some((s) => s.value !== null)) return
+    autosave.update(
+      currentItem.id,
+      buildScorePayload(currentScoreState),
+      scoreSnapshot(currentScoreState)
+    )
+  }, [currentItem, currentScoreState, autosave])
 
-    // Build a snapshot of the current state
-    const snapshot = JSON.stringify({
-      scores: currentScoreState.scores,
-      notes: currentScoreState.notes,
-    })
-
-    // Skip if nothing changed or no scores set yet
-    const hasAnyScore = currentScoreState.scores.some((s) => s.value !== null)
-    if (!hasAnyScore || snapshot === lastSavedRef.current) return
-
-    // Clear any pending timer
-    if (autoSaveTimerRef.current) {
-      clearTimeout(autoSaveTimerRef.current)
-    }
-
-    setSaveStatus('idle')
-
-    autoSaveTimerRef.current = setTimeout(async () => {
-      if (saveInProgressRef.current) return
-      saveInProgressRef.current = true
-      setSaveStatus('saving')
-      try {
-        const scoresToSave = currentScoreState.scores
-          .filter((s) => s.value !== null)
-          .map((s) => ({ dimensionId: s.dimensionId, value: s.value! }))
-
-        const ok = await persistItemScores({
-          feedbackItemId: currentItem.id,
-          scores: scoresToSave,
-          notes: currentScoreState.notes || undefined,
-          startedAt: currentScoreState.startedAt || undefined,
-        })
-
-        if (ok) {
-          lastSavedRef.current = snapshot
-          setSaveStatus('saved')
-        } else {
-          setSaveStatus('error')
-        }
-      } catch {
-        setSaveStatus('error')
-      } finally {
-        saveInProgressRef.current = false
-      }
-    }, 1000)
-
-    return () => {
-      if (autoSaveTimerRef.current) {
-        clearTimeout(autoSaveTimerRef.current)
-      }
-    }
-  }, [currentItem, currentScoreState, persistItemScores])
-
-  // Reset save status when navigating to a new item
+  // Reload / tab close while something is unsaved: send it now (the keepalive
+  // request completes even if they leave) and ask the browser to warn.
   useEffect(() => {
-    setSaveStatus('idle')
-    lastSavedRef.current = ''
-  }, [currentIndex])
+    const warn = (event: BeforeUnloadEvent) => {
+      if (!autosave.isDirty()) return
+      void autosave.flushAll()
+      event.preventDefault()
+      // Chrome/Edge < 119 only show the prompt when returnValue is set.
+      event.returnValue = true
+    }
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [autosave])
+
+  // Client-side navigation (sidebar links) never fires beforeunload, so send
+  // whatever is pending as the screen goes away. The requests outlive the
+  // component.
+  useEffect(() => {
+    return () => {
+      void autosave.flushAll()
+    }
+  }, [autosave])
+
+  const saveStatus: AutosaveStatus = currentItem
+    ? (statusByItem[currentItem.id] ?? 'idle')
+    : 'idle'
+  const failedIndexes = items.flatMap((item, i) =>
+    statusByItem[item.id] === 'error' ? [i] : []
+  )
+
+  // ---------------------------------------------------------------------------
+  // Navigation
+  // ---------------------------------------------------------------------------
+
+  // Every way off an item goes through here so its pending debounce is sent
+  // first. The flush is not awaited: the scheduler keeps the request alive
+  // regardless of which item is on screen, and that item's status (plus the
+  // header warning) reports the outcome.
+  function goToItem(index: number) {
+    if (currentItem) void autosave.flush(currentItem.id)
+    setCurrentIndex(index)
+  }
+
+  async function handleBackToDashboard() {
+    setLeaving(true)
+    const ok = await autosave.flushAll()
+    if (ok) {
+      router.push('/')
+      return
+    }
+    // Stay, on the item whose save failed, so it can be retried.
+    setLeaving(false)
+    const failedIndex = items.findIndex((item) => autosave.isDirty(item.id))
+    if (failedIndex !== -1) setCurrentIndex(failedIndex)
+  }
 
   // ---------------------------------------------------------------------------
   // Score handlers
@@ -517,36 +566,20 @@ export function EvaluateClient({
   async function handleContinue() {
     if (!currentItem || !currentScoreState || !allDimensionsScored) return
 
-    // Cancel any pending auto-save
-    if (autoSaveTimerRef.current) {
-      clearTimeout(autoSaveTimerRef.current)
-      autoSaveTimerRef.current = null
-    }
-
-    // Wait for any in-progress auto-save to complete
-    if (saveInProgressRef.current) return
-
     setSaving(true)
-    saveInProgressRef.current = true
     try {
-      const startedAt = currentScoreState.startedAt ?? new Date().toISOString()
-
-      // Force-save (upsert) with timing data
-      const ok = await persistItemScores({
-        feedbackItemId: currentItem.id,
-        scores: currentScoreState.scores
-          .filter((s) => s.value !== null)
-          .map((s) => ({
-            dimensionId: s.dimensionId,
-            value: s.value!,
-          })),
-        notes: currentScoreState.notes || undefined,
-        startedAt,
-      })
-
-      if (!ok) {
-        throw new Error('Save failed')
-      }
+      // Explicit save: always sent (with timing data), queued behind any
+      // auto-save already in flight for this item rather than skipped.
+      const ok = await autosave.save(
+        currentItem.id,
+        buildScorePayload({
+          ...currentScoreState,
+          startedAt: currentScoreState.startedAt ?? new Date().toISOString(),
+        }),
+        scoreSnapshot(currentScoreState)
+      )
+      // On failure the status chip shows "Save failed" with a Retry.
+      if (!ok) return
 
       // Mark saved
       setItemScores((prev) => ({
@@ -557,8 +590,6 @@ export function EvaluateClient({
         },
       }))
 
-      setSaveStatus('saved')
-
       // Auto-advance to next unscored item
       const nextUnscoredIndex = items.findIndex(
         (item, i) => i > currentIndex && !itemScores[item.id]?.saved
@@ -568,11 +599,8 @@ export function EvaluateClient({
       } else if (currentIndex < items.length - 1) {
         setCurrentIndex(currentIndex + 1)
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save scores')
     } finally {
       setSaving(false)
-      saveInProgressRef.current = false
     }
   }
 
@@ -635,7 +663,7 @@ export function EvaluateClient({
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <Button variant="outline" onClick={() => router.push('/')}>
+              <Button variant="outline" onClick={handleBackToDashboard}>
                 Return to Dashboard
               </Button>
             </CardContent>
@@ -679,7 +707,8 @@ export function EvaluateClient({
               >
                 Review Scores
               </Button>
-              <Button onClick={() => router.push('/')}>
+              <Button onClick={handleBackToDashboard} disabled={leaving}>
+                {leaving && <Loader2 className="size-4 animate-spin" />}
                 Return to Dashboard
               </Button>
             </CardContent>
@@ -713,10 +742,15 @@ export function EvaluateClient({
               <Button
                 variant="ghost"
                 size="icon-sm"
-                onClick={() => router.push('/')}
+                onClick={handleBackToDashboard}
+                disabled={leaving}
                 title="Back to Dashboard"
               >
-                <ArrowLeft className="size-4" />
+                {leaving ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <ArrowLeft className="size-4" />
+                )}
               </Button>
               <h1 className="text-lg font-semibold text-foreground">
                 {project.name}
@@ -752,13 +786,32 @@ export function EvaluateClient({
             </div>
           </div>
 
+          {/* Items whose last save failed, wherever the annotator is now */}
+          {failedIndexes.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 text-xs text-destructive">
+              <AlertTriangle className="size-3.5" />
+              <span>Not saved yet:</span>
+              {failedIndexes.map((index) => (
+                <button
+                  key={index}
+                  type="button"
+                  onClick={() => goToItem(index)}
+                  className="rounded-md px-1.5 py-0.5 font-medium underline-offset-2 transition-all duration-200 hover:bg-destructive/10 hover:underline"
+                >
+                  item {index + 1}
+                </button>
+              ))}
+              <span>Open the item to retry.</span>
+            </div>
+          )}
+
           {/* Navigation */}
           <div className="flex items-center gap-2">
             <Button
               variant="outline"
               size="icon-sm"
               disabled={currentIndex === 0}
-              onClick={() => setCurrentIndex((i) => i - 1)}
+              onClick={() => goToItem(currentIndex - 1)}
             >
               <ChevronLeft className="size-4" />
             </Button>
@@ -770,13 +823,15 @@ export function EvaluateClient({
                 ) : (
                   <button
                     key={entry}
-                    onClick={() => setCurrentIndex(entry as number)}
+                    onClick={() => goToItem(entry as number)}
                     className={`flex size-7 shrink-0 items-center justify-center rounded-full text-xs font-medium transition-all duration-200 ${
                       entry === currentIndex
                         ? 'bg-nav-current-bg text-nav-current-text ring-2 ring-nav-current-ring'
-                        : itemScores[items[entry as number]?.id]?.saved
-                          ? 'bg-nav-scored-bg text-nav-scored-text'
-                          : 'bg-nav-unscored-bg text-nav-unscored-text hover:opacity-80'
+                        : statusByItem[items[entry as number]?.id] === 'error'
+                          ? 'bg-nav-unscored-bg text-destructive ring-2 ring-destructive/60 hover:opacity-80'
+                          : itemScores[items[entry as number]?.id]?.saved
+                            ? 'bg-nav-scored-bg text-nav-scored-text'
+                            : 'bg-nav-unscored-bg text-nav-unscored-text hover:opacity-80'
                     }`}
                   >
                     {(entry as number) + 1}
@@ -789,7 +844,7 @@ export function EvaluateClient({
               variant="outline"
               size="icon-sm"
               disabled={currentIndex === items.length - 1}
-              onClick={() => setCurrentIndex((i) => i + 1)}
+              onClick={() => goToItem(currentIndex + 1)}
             >
               <ChevronRight className="size-4" />
             </Button>
@@ -1087,6 +1142,15 @@ export function EvaluateClient({
                     <>
                       <AlertTriangle className="size-3 text-destructive" />
                       <span>Save failed</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          currentItem && void autosave.flush(currentItem.id)
+                        }
+                        className="font-medium text-foreground underline underline-offset-2 transition-all duration-200 hover:text-primary"
+                      >
+                        Retry
+                      </button>
                     </>
                   )}
                 </div>
