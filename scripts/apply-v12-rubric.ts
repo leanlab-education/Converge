@@ -8,12 +8,14 @@
  * unaffected because we only edit description / guidanceJson / scoreLabelJson.
  *
  * Idempotent: safe to run multiple times. Runs against whatever DATABASE_URL
- * doppler injects (preview branch now, prod at cutover).
+ * doppler injects (preview branch now, prod at cutover). Any Neon host
+ * requires --allow-prod and typing the host name back at the prompt.
  *
- * Usage: doppler run -p writing-evaluator -c <cfg> -- npx tsx scripts/apply-v12-rubric.ts
+ * Usage: doppler run -p writing-evaluator -c <cfg> -- npx tsx scripts/apply-v12-rubric.ts [--allow-prod]
  */
 import { PrismaClient } from '../src/generated/prisma/client.js'
 import { PrismaNeon } from '@prisma/adapter-neon'
+import { assertNotProduction } from './_guard.js'
 
 const QUILL_PROJECT_ID = 'cmp337i4x0000q2zga4bfjtcp'
 
@@ -79,6 +81,8 @@ const V12: V12Criterion[] = [
 ]
 
 async function main() {
+  await assertNotProduction('apply-v12-rubric')
+
   const adapter = new PrismaNeon({ connectionString: process.env.DATABASE_URL! })
   const prisma = new PrismaClient({ adapter })
 

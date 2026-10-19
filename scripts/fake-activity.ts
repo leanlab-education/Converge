@@ -3,15 +3,21 @@
  * annotators so the time-tracking UI has something to show.
  *
  * Usage:
- *   doppler run -p writing-evaluator -c dev -- npx tsx scripts/fake-activity.ts <projectId>
+ *   doppler run -p writing-evaluator -c dev -- npx tsx scripts/fake-activity.ts <projectId> [--allow-prod]
  *
  * Idempotency: this script clears existing ActivitySession + ActivityDaily
  * rows for the project's annotators before inserting new ones. Re-running
  * regenerates fresh fake data.
+ *
+ * DESTRUCTIVE: it deletes every real activity row for those annotators too.
+ * The production guard refuses the production host unconditionally and
+ * requires --allow-prod plus a typed host confirmation for any other Neon
+ * host (e.g. a preview branch). Note that `-c dev` points at production.
  */
 
 import { PrismaClient } from '../src/generated/prisma/client'
 import { PrismaNeon } from '@prisma/adapter-neon'
+import { assertNotProduction, positionalArgs } from './_guard'
 
 type Bucket = 'ANNOTATION' | 'OTHER'
 
@@ -152,16 +158,13 @@ async function computeDailyActivity(prisma: PrismaClient, userId: string, date: 
 }
 
 async function main() {
-  const projectId = process.argv[2]
+  const [projectId] = positionalArgs()
   if (!projectId) {
-    console.error('Usage: tsx scripts/fake-activity.ts <projectId>')
+    console.error('Usage: tsx scripts/fake-activity.ts <projectId> [--allow-prod]')
     process.exit(1)
   }
 
-  if (process.env.NODE_ENV === 'production' || process.env.VERCEL) {
-    console.error('Refusing to run in production.')
-    process.exit(1)
-  }
+  await assertNotProduction('fake-activity', { neverProduction: true })
 
   const adapter = new PrismaNeon({ connectionString: process.env.DATABASE_URL! })
   const prisma = new PrismaClient({ adapter })

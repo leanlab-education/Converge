@@ -2,6 +2,7 @@ import 'dotenv/config'
 import { PrismaClient } from '../src/generated/prisma/client.js'
 import { PrismaNeon } from '@prisma/adapter-neon'
 import { DEFAULT_RUBRIC } from '../src/lib/rubric-templates.js'
+import { assertNotProduction } from './_guard.js'
 
 function getArg(name: string): string | null {
   const prefix = `${name}=`
@@ -87,6 +88,9 @@ async function main() {
       console.log('\nDry run complete. Re-run with --write to apply changes.')
       return
     }
+
+    // Writes start here; the dry run above may preview any host.
+    await assertNotProduction('sync-default-rubric')
 
     await prisma.$transaction(
       updates.map((update) =>

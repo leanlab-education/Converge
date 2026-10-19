@@ -3,13 +3,21 @@ import { readFileSync } from 'fs'
 import { PrismaClient } from '../src/generated/prisma/client.js'
 import { PrismaNeon } from '@prisma/adapter-neon'
 import { parseCSV, validateCSVRow } from '../src/lib/csv-parser.js'
+import {
+  ALLOW_PROD_FLAG,
+  assertNotProduction,
+  hasAllowProdFlag,
+  positionalArgs,
+} from './_guard.js'
 
-const projectName = process.argv[2]
-const csvPath = process.argv[3]
+const [projectName, csvPath] = positionalArgs()
 const dryRun = !process.argv.includes('--write')
+const allowProd = hasAllowProdFlag()
 
 if (!projectName || !csvPath) {
-  console.error('Usage: wipe-and-reimport.ts "Project Name" /path/to/file.csv [--write]')
+  console.error(
+    'Usage: wipe-and-reimport.ts "Project Name" /path/to/file.csv [--write] [--allow-prod]'
+  )
   process.exit(1)
 }
 
@@ -55,6 +63,16 @@ async function main() {
     console.log(`Would import: ${rows.length} new items`)
     await prisma.$disconnect()
     return
+  }
+
+  // Writes start here. The dry run above is read-only and may preview any host.
+  await assertNotProduction('wipe-and-reimport', { allowProd })
+  if (beforeCounts.scores > 0 && !allowProd) {
+    console.error(
+      `\nRefusing: ${beforeCounts.scores} scores exist on this project and deleting its feedback items would cascade-delete them. Pass ${ALLOW_PROD_FLAG} to proceed anyway.`
+    )
+    await prisma.$disconnect()
+    process.exit(1)
   }
 
   console.log('\nWiping...')

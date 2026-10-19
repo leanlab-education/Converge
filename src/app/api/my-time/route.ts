@@ -1,6 +1,6 @@
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/db'
-import { periodRange, type Period } from '@/lib/activity-tracker-config'
+import { parsePeriodQuery } from '@/lib/activity-tracker-config'
 import { NextRequest, NextResponse } from 'next/server'
 
 // Returns the *current user's* aggregated activity time for a period.
@@ -12,33 +12,11 @@ export async function GET(request: NextRequest) {
   }
   const userId = session.user.id
 
-  const { searchParams } = new URL(request.url)
-  const periodParam = searchParams.get('period') ?? 'month'
-  if (
-    periodParam !== 'week' &&
-    periodParam !== 'month' &&
-    periodParam !== 'all' &&
-    periodParam !== 'custom'
-  ) {
-    return NextResponse.json({ error: 'Invalid period' }, { status: 400 })
+  const parsed = parsePeriodQuery(new URL(request.url).searchParams)
+  if (!parsed.ok) {
+    return NextResponse.json({ error: parsed.error }, { status: 400 })
   }
-  const period = periodParam as Period
-
-  const fromParam = searchParams.get('from')
-  const toParam = searchParams.get('to')
-
-  let range
-  try {
-    range = periodRange(period, {
-      from: fromParam ? new Date(fromParam) : undefined,
-      to: toParam ? new Date(toParam) : undefined,
-    })
-  } catch (e) {
-    return NextResponse.json(
-      { error: e instanceof Error ? e.message : 'Invalid range' },
-      { status: 400 }
-    )
-  }
+  const { period, range } = parsed
 
   const dailyRows = await prisma.activityDaily.findMany({
     where: { userId, date: { gte: range.from, lt: range.to } },
