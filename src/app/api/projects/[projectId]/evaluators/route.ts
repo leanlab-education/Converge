@@ -50,28 +50,18 @@ export async function GET(
                 select: { userId: true },
                 orderBy: { user: { email: 'asc' } },
               },
+              dimensions: {
+                select: { dimensionId: true },
+              },
             },
           },
         },
       },
       batch: {
-        select: { id: true, isDoubleScored: true, type: true },
+        select: { id: true, projectId: true, isDoubleScored: true, type: true },
       },
     },
   })
-
-  // Distinct (userId, feedbackItemId) pairs with at least one score in this project
-  const scoredPairs = await prisma.score.findMany({
-    where: { feedbackItem: { batch: { projectId } }, isReconciled: false },
-    select: { userId: true, feedbackItemId: true },
-    distinct: ['userId', 'feedbackItemId'],
-  })
-
-  // completedCount per userId
-  const completedByUser = new Map<string, number>()
-  for (const { userId } of scoredPairs) {
-    completedByUser.set(userId, (completedByUser.get(userId) ?? 0) + 1)
-  }
 
   // Group batch assignments by userId
   const basByUser = new Map<string, typeof batchAssignments>()
@@ -81,17 +71,23 @@ export async function GET(
     basByUser.set(ba.userId, list)
   }
 
-  const { itemCountByBatchSlot } = await loadSlotMaps(
-    batchAssignments.map((ba) => ba.batch.id)
-  )
+  // Assigned = this user's slot-adjusted share of each batch; completed = the
+  // items in that share they have scored on every criterion they owe (a
+  // half-scored item does not count).
+  const { itemCountByBatchSlot, scoredCountByUser } = await loadSlotMaps(batchAssignments)
 
   const assignedByUser = new Map<string, number>()
+  const completedByUser = new Map<string, number>()
   for (const [userId, bas] of basByUser) {
-    let total = 0
+    const scoredMap = scoredCountByUser.get(userId) ?? new Map()
+    let assigned = 0
+    let completed = 0
     for (const ba of bas) {
-      total += countForAssignment(ba, userId, itemCountByBatchSlot)
+      assigned += countForAssignment(ba, userId, itemCountByBatchSlot)
+      completed += countForAssignment(ba, userId, scoredMap)
     }
-    assignedByUser.set(userId, total)
+    assignedByUser.set(userId, assigned)
+    completedByUser.set(userId, completed)
   }
 
   const latestScores = await prisma.score.findMany({

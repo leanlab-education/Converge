@@ -79,10 +79,10 @@ export default async function HomePage() {
     },
   })
 
-  const { itemCountByBatchSlot, scoredCountByBatchSlot } = await loadSlotMaps(
-    batchAssignments.map((ba) => ba.batch.id),
-    session.user.id
-  )
+  // scoredCount only counts items this user has scored on EVERY criterion they
+  // owe on that batch, so a half-scored item can't read as done.
+  const { itemCountByBatchSlot, scoredCountByUser } = await loadSlotMaps(batchAssignments)
+  const scoredCountByBatchSlot = scoredCountByUser.get(session.user.id) ?? new Map()
 
   // Group batch assignments by projectId and count scored items
   const batchesByProject = new Map<
@@ -106,9 +106,7 @@ export default async function HomePage() {
     // For slot-split (non-double-scored regular) batches, countForAssignment
     // returns just this user's slot. Otherwise it returns the full batch total.
     const itemCount = countForAssignment(ba, session.user.id, itemCountByBatchSlot)
-    const scoredCount = scoredCountByBatchSlot
-      ? countForAssignment(ba, session.user.id, scoredCountByBatchSlot)
-      : 0
+    const scoredCount = countForAssignment(ba, session.user.id, scoredCountByBatchSlot)
 
     const releaseStatus = ba.teamRelease?.status ?? ba.batch.status
     const releaseId = ba.teamReleaseId ?? null

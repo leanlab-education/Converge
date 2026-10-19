@@ -14,17 +14,29 @@ import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import { ArrowRight, Layers, Scale, Users, Gavel, CheckCircle2, PencilLine } from 'lucide-react'
 import { AppShell } from '@/components/app-shell'
+import {
+  getAnnotatorBatchBadge,
+  getAnnotatorBatchButton,
+  isAnnotatorScoringTodo,
+  type AnnotatorBatchProgress,
+  type AnnotatorBatchTone,
+} from '@/lib/annotator-batch-state'
 
-interface BatchInfo {
+interface BatchInfo extends AnnotatorBatchProgress {
   id: string
   releaseId: string | null
   name: string
-  status: string
-  itemCount: number
-  scoredCount: number
   createdAt: string
   activityId: string | null
   conjunctionId: string | null
+}
+
+const badgeToneClass: Record<AnnotatorBatchTone, string> = {
+  active: 'bg-status-active-bg text-status-active-text',
+  waiting: 'bg-status-setup-bg text-status-setup-text',
+  reconciliation: 'bg-status-reconciliation-bg text-status-reconciliation-text',
+  complete: 'bg-status-complete-bg text-status-complete-text',
+  muted: 'text-muted-foreground',
 }
 
 // How the Scoring batch list is grouped. The base order is always
@@ -246,9 +258,6 @@ export function EvaluatorProjectPage({
                     a.createdAt.localeCompare(b.createdAt) ||
                     a.name.localeCompare(b.name)
                 )
-                const isDone = (b: BatchInfo) =>
-                  b.itemCount > 0 && b.scoredCount >= b.itemCount
-
                 // Show the conjunction only for activities that actually have
                 // more than one variant among this annotator's batches — in the
                 // common single-variant case "(Because)" is noise.
@@ -265,8 +274,11 @@ export function EvaluatorProjectPage({
 
                 let groups: { label: string | null; items: BatchInfo[] }[]
                 if (groupBy === 'status') {
-                  const todo = sorted.filter((b) => !isDone(b))
-                  const done = sorted.filter(isDone)
+                  // Same rule as the card badge: "to do" while this annotator
+                  // has scoring left, "completed" once their share is scored
+                  // (even if the release is still waiting on a partner).
+                  const todo = sorted.filter(isAnnotatorScoringTodo)
+                  const done = sorted.filter((b) => !isAnnotatorScoringTodo(b))
                   groups = [
                     { label: `To do (${todo.length})`, items: todo },
                     { label: `Completed (${done.length})`, items: done },
@@ -290,9 +302,12 @@ export function EvaluatorProjectPage({
                     batch.itemCount > 0
                       ? Math.round((batch.scoredCount / batch.itemCount) * 100)
                       : 0
-                  const batchComplete = batchPct === 100
-                  const isScoring = batch.status === 'SCORING'
-                  const isReconciling = batch.status === 'RECONCILING'
+                  // Badge and button come from the release status PLUS this
+                  // annotator's own completion — a batch the server still has
+                  // in SCORING can never read as complete, and always stays
+                  // enterable (Batch 65, Amber 2026-10-19).
+                  const badge = getAnnotatorBatchBadge(batch)
+                  const button = getAnnotatorBatchButton(batch)
                   const activity = activityLabel(batch, needsConjunction(batch))
 
                   return (
@@ -301,19 +316,8 @@ export function EvaluatorProjectPage({
                         <div className="min-w-0">
                           <div className="flex items-center gap-2">
                             <span className="truncate text-sm font-medium">{batch.name}</span>
-                            <Badge
-                              variant="outline"
-                              className={
-                                isReconciling
-                                  ? 'bg-status-reconciliation-bg text-status-reconciliation-text'
-                                  : batchComplete
-                                    ? 'bg-status-complete-bg text-status-complete-text'
-                                    : isScoring
-                                      ? 'bg-status-active-bg text-status-active-text'
-                                      : 'text-muted-foreground'
-                              }
-                            >
-                              {isReconciling ? 'Reconciling' : batchComplete ? 'Complete' : isScoring ? 'Open' : 'Not Open'}
+                            <Badge variant="outline" className={badgeToneClass[badge.tone]}>
+                              {badge.label}
                             </Badge>
                           </div>
                           <p className="mt-0.5 text-xs text-muted-foreground">
@@ -321,29 +325,21 @@ export function EvaluatorProjectPage({
                             {activity && groupBy !== 'activity' && ` · ${activity}`}
                           </p>
                         </div>
-                        {isReconciling ? (
-                          <Button size="sm" className="shrink-0" onClick={() => setSection('reconciliation')}>
-                            Reconcile
-                          </Button>
-                        ) : (
-                          <Button
-                            size="sm"
-                            className="shrink-0"
-                            variant={batchComplete ? 'outline' : 'default'}
-                            disabled={!isScoring || batchComplete}
-                            onClick={() =>
+                        <Button
+                          size="sm"
+                          className="shrink-0"
+                          variant={button.variant}
+                          disabled={button.disabled}
+                          onClick={() => {
+                            if (button.action === 'reconcile') {
+                              setSection('reconciliation')
+                            } else if (button.action === 'score') {
                               router.push(`/evaluate/${project.id}?batchId=${batch.id}`)
                             }
-                          >
-                            {batchComplete
-                              ? 'Done'
-                              : !isScoring
-                                ? 'Not Open'
-                                : batch.scoredCount > 0
-                                  ? 'Continue'
-                                  : 'Start'}
-                          </Button>
-                        )}
+                          }}
+                        >
+                          {button.label}
+                        </Button>
                       </CardContent>
                       <Progress value={batchPct} className="mx-3 mb-0.5 h-1 w-auto" />
                     </Card>
