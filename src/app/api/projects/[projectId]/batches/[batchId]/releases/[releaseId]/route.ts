@@ -1,6 +1,7 @@
 import { auth } from '@/lib/auth'
 import { canAdminProject } from '@/lib/authorization'
 import { prisma } from '@/lib/db'
+import { assertProjectMembers } from '@/lib/project-scope'
 import {
   syncBatchAssignmentsForRelease,
   syncBatchStatus,
@@ -95,9 +96,21 @@ export async function PATCH(
     return NextResponse.json({ error: 'Release not found' }, { status: 404 })
   }
 
-  if (release.status === 'COMPLETE') {
+  // COMPLETE only means every discrepancy was resolved — the batch is not
+  // frozen (see CLAUDE.md "Batch lock & editable reconciliation"). A pair can
+  // still revisit a final while the batch is unlocked, and escalating from
+  // there needs an adjudicator (escalate/route.ts accepts COMPLETE releases),
+  // so the adjudicator stays editable. Visibility and the scoring assignment
+  // are what define a finished release and stay frozen.
+  if (
+    release.status === 'COMPLETE' &&
+    (isVisible !== undefined || scorerUserId !== undefined)
+  ) {
     return NextResponse.json(
-      { error: 'Cannot change a completed release' },
+      {
+        error:
+          'Cannot change the visibility or scoring assignment of a completed release',
+      },
       { status: 400 }
     )
   }
@@ -133,13 +146,12 @@ export async function PATCH(
   // Only meaningful for double-scored regular batches, but any project user may
   // serve (Amber/Rachel or a peer annotator like Riley) — Amber 2026-06-18.
   if (adjudicatorId !== undefined && adjudicatorId !== null) {
-    const user = await prisma.user.findUnique({
-      where: { id: adjudicatorId },
-      select: { id: true },
-    })
-    if (!user) {
+    // Must be on THIS project (audit H-A2) — the Batches tab only offers
+    // project annotators, and an outsider could not open the adjudicate view.
+    const adjudicatorScope = await assertProjectMembers(projectId, [adjudicatorId])
+    if (!adjudicatorScope.ok) {
       return NextResponse.json(
-        { error: 'Adjudicator user not found' },
+        { error: 'The adjudicator must be an annotator on this project' },
         { status: 400 }
       )
     }
@@ -176,8 +188,13 @@ export async function PATCH(
     },
   })
 
-  await syncBatchAssignmentsForRelease(releaseId)
-  await syncBatchStatus(batchId)
+  // The adjudicator is not an assignee and does not affect release status, so
+  // an adjudicator-only change (the one edit allowed on a COMPLETE release)
+  // leaves assignments and batch status alone.
+  if (isVisible !== undefined || scorerUserId !== undefined) {
+    await syncBatchAssignmentsForRelease(releaseId)
+    await syncBatchStatus(batchId)
+  }
 
   return NextResponse.json(updated)
 }
