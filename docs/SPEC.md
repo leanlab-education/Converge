@@ -298,17 +298,18 @@ Pages: `app/reconcile/[projectId]` → `reconcile-client.tsx`; entry tasks compu
 - `RECONCILING → COMPLETE` (auto): `maybeCompleteReleaseReconciliation(releaseId)` (`reconciliation.ts:195`), called after each reconcile POST and each adjudication:
   - Recomputes discrepant `(item,dim)` keys from originals (two distinct members, differing values).
   - Computes reconciled keys (owner's `isReconciled` rows).
-  - **Completes only when every discrepancy has a reconciled row AND there are zero open escalations** (`reconciliation.ts:256-269`). Otherwise no-op.
+  - **Completes only when every expected raw score exists, every discrepancy has a reconciled row AND there are zero open escalations** (the fully-scored gate was added 2026-10-19, PR #15). Otherwise no-op.
+- `COMPLETE → RECONCILING`: an admin re-opening a criterion (`criterion-unlocks` POST — only allowed while RECONCILING or COMPLETE), a pair escalating from the edit-after-COMPLETE flow (`escalate` POST, one transaction), or a revision that creates a new disagreement (`reReconcileReleaseItem`). A revision never moves a SCORING release forward. Each of these also `syncBatchStatus`.
+- `SCORING` self-heal: the annotator project page calls `healStrandedRelease()` for any SCORING release the viewer has finished, re-running `maybeAdvanceReleaseAfterScore` in case the post-save advancement failed transiently.
 
 #### Batch status (derived): `syncBatchStatus(batchId)` (`team-batch-releases.ts:152`)
-Given the release statuses:
-- no releases → `DRAFT`
-- all `COMPLETE` → `COMPLETE`
-- any `RECONCILING` → `RECONCILING`
-- any `SCORING` → `SCORING`
-- else → `DRAFT`
+`deriveBatchStatus()` (pure, 2026-10-19): releases still in `DRAFT` are ignored once any release has progressed.
+- no release past `DRAFT` → `DRAFT`
+- every progressed release `COMPLETE` → `COMPLETE`
+- any progressed release `RECONCILING` → `RECONCILING`
+- else → `SCORING`
 - Also sets `batch.isAssigned = any release status !== 'DRAFT'`.
-- Note: the `assign` route additionally flips a `DRAFT` batch to `SCORING` directly on first assignment (`batches/[batchId]/assign/route.ts:69`).
+- A hidden stub release created for a team added later therefore never demotes a finished batch (the old rule turned `[COMPLETE, COMPLETE, DRAFT]` into `DRAFT`), and `ensureTeamReleasesForBatch` creates no stubs on `COMPLETE` or locked batches. The legacy `assign` route no longer exists.
 
 **Invariants:**
 - A release with a partner who hasn't finished stays `SCORING` (not enough scores → `isReleaseFullyScored` false).
@@ -318,11 +319,12 @@ Given the release statuses:
 ### 3.F Escalation & adjudication
 - **Create:** `POST .../escalate` (`escalate/route.ts:15`):
   - Auth: assignment on the release **or** project admin.
-  - Release must be `RECONCILING` (400).
-  - **`release.adjudicatorId` must be set, else 400** with a "no adjudicator assigned" message (Invariant I-9).
-  - `feedbackItem` must be in the batch; `dimension` must belong to the project.
+  - Release must be `RECONCILING` or `COMPLETE` (edit-after-COMPLETE flow; a COMPLETE release is moved back to `RECONCILING` in the same transaction and the batch re-synced). Locked batch → 423. Slot-split (independent) releases → 400.
+  - **`release.adjudicatorId` must be set, else 400** with a "no adjudicator assigned" message (Invariant I-9). An adjudicator may be assigned on a COMPLETE release (PR #14).
+  - `feedbackItem` must be in the batch; `dimension` must be one the release scores (team criteria on REGULAR, whole rubric on TRAINING).
   - Creates `Escalation` with `escalatedById = session user`. Duplicate `(release,item,dimension)` → 409 (`escalate/route.ts:131`).
-- **Withdraw:** `DELETE .../escalate?releaseId&feedbackItemId&dimensionId` (`escalate/route.ts:143`): only the original escalator or an admin; only while unresolved (resolved → 400).
+- **Withdraw:** `DELETE .../escalate?releaseId&feedbackItemId&dimensionId` (`escalate/route.ts:143`): only the original escalator or an admin; only while unresolved (resolved → 400); refused on a locked batch (423); re-checks completion afterwards so withdrawing the last blocker can complete the release.
+- **Revision voids a ruling:** when an admin re-opens a criterion and a revised raw score lands on a cell that was escalated (open or resolved), `reReconcileReleaseItem` deletes that `Escalation` with the final, returning the cell to an ordinary open discrepancy (disagree) or an auto-reconciled agreement (agree).
 - **Adjudicate queue:** `GET /api/adjudicate` (`adjudicate/route.ts:12`): open escalations where the user is `adjudicatorId` (admins see all; project admins also see all in their projects). Enriches with both coders' original values + notes and the pair's reconciliation note.
 - **Resolve:** `POST /api/adjudicate` (`adjudicate/route.ts:186`): body `resolutions[]`:
   - All referenced escalations must exist and be unresolved (`route.ts:229`).
@@ -354,7 +356,8 @@ Given the release statuses:
 - IRR denominator counts only doubly-scored (item,dim) pairs (I-6).
 - A team of size ≠ 2 yields `isApplicable:false`, pct null.
 
-### 3.H Export semantics (`src/app/api/export/route.ts`)
+### 3.H Export semantics (`src/lib/export.ts`, `src/lib/export-query.ts`)
+> Redesigned 2026-07-28 and 2026-09-08; CLAUDE.md's "Export" section is the authoritative description of the four kinds (`raw-by-scorer`, `final-by-scorer`, `final-by-item`, `discrepancies`; legacy aliases `original` / `reconciled`), their scopes and column layouts. The bullets below describe the pre-refactor route and are kept only for the invariants at the end. Added 2026-10-19 (PR #16): on independent batches the raw "final" is restricted to the item's expected scorer, cells with more than one distinct candidate are blanked and counted (`X-Export-Conflicts`, `conflictCount`), rows are ordered by numeric Feedback_ID, and Scorer A/B on paired batches is the member's email-order position.
 - `GET /api/export?projectId&type&format?&activityId?&conjunctionId?&batchId?` — `canAdminProject` gated. `type ∈ {original, reconciled, discrepancies}`.
 - **Unblinding:** all export rows include `Feedback_Source` (the AI/HUMAN value) written **raw, not escaped** (`route.ts:248`) — this is the unblinding step (I-11).
 - **Original (`type=original`)** (`route.ts:84`): selects **all `isReconciled=false`** scores — one row per `(feedbackItem, evaluator)`, wide format with one column per dimension key. Includes `Score_ID` (synthetic `S001…`), `Evaluator_Email`, `Scoring_Role`, `Team_Name`, `Batch_Name`, `Batch_Type`, dimension columns (labels as headers, values keyed by dimension key), `Notes`, `Timestamp`.
