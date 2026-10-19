@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation'
 import { EvaluatorProjectPage } from './evaluator-project-page'
 import { countForAssignment, loadSlotMaps } from '@/lib/evaluator-stats'
 import { computeReleaseDiscrepancyStats } from '@/lib/reconciliation'
+import { releaseNeedsReconciliation } from '@/lib/team-batch-releases'
 import { unlockVisibleToUserWhere } from '@/lib/criterion-unlocks'
 import { displayAnnotatorName } from '@/lib/generate-name'
 
@@ -89,24 +90,34 @@ export default async function ProjectPage({
     }
   }
 
-  const { itemCountByBatchSlot, scoredCountByBatchSlot } = await loadSlotMaps(
-    batchAssignments.map((ba) => ba.batch.id),
-    userId
-  )
+  // scoredCount only counts items this user has scored on EVERY criterion they
+  // owe on that batch, so a half-scored item can't read as done.
+  const { itemCountByBatchSlot, scoredCountByUser } = await loadSlotMaps(batchAssignments)
+  const scoredCountByBatchSlot = scoredCountByUser.get(userId) ?? new Map()
 
   const batches = batchAssignments.map((ba) => {
     const itemCount = countForAssignment(ba, userId, itemCountByBatchSlot)
-    const scoredCount = scoredCountByBatchSlot
-      ? countForAssignment(ba, userId, scoredCountByBatchSlot)
-      : 0
+    const scoredCount = countForAssignment(ba, userId, scoredCountByBatchSlot)
     const releaseStatus = ba.teamRelease?.status ?? ba.batch.status
     const releaseId = ba.teamReleaseId ?? null
     const activity = activityByBatch.get(ba.batch.id)
+    // A paired release (double-scored or training) stays SCORING until the
+    // partner finishes too, so the card can say "Waiting on partner" rather
+    // than "Scored" once this user's own share is done.
+    const isPaired = ba.teamRelease
+      ? releaseNeedsReconciliation({
+          id: ba.teamRelease.id,
+          scorerUserId: ba.teamRelease.scorerUserId,
+          batch: ba.batch,
+          team: ba.teamRelease.team,
+        })
+      : false
     return {
       id: ba.batch.id,
       releaseId,
       name: ba.batch.name,
       status: releaseStatus,
+      isPaired,
       itemCount,
       scoredCount,
       createdAt: ba.batch.createdAt.toISOString(),

@@ -42,6 +42,9 @@ export async function GET() {
                 select: { userId: true },
                 orderBy: { user: { email: 'asc' } },
               },
+              dimensions: {
+                select: { dimensionId: true },
+              },
             },
           },
         },
@@ -54,10 +57,8 @@ export async function GET() {
     },
   })
 
-  const { itemCountByBatchSlot, scoredCountByBatchSlot } = await loadSlotMaps(
-    batchAssignments.map((ba) => ba.batch.id),
-    session.user.id
-  )
+  const { itemCountByBatchSlot, scoredCountByUser } = await loadSlotMaps(batchAssignments)
+  const scoredCountByBatchSlot = scoredCountByUser.get(session.user.id) ?? new Map()
 
   // Group batch assignments by projectId
   const batchesByProject = new Map<
@@ -70,9 +71,7 @@ export async function GET() {
     if (!batchesByProject.has(pid)) batchesByProject.set(pid, [])
 
     const itemCount = countForAssignment(ba, session.user.id, itemCountByBatchSlot)
-    const scoredCount = scoredCountByBatchSlot
-      ? countForAssignment(ba, session.user.id, scoredCountByBatchSlot)
-      : 0
+    const scoredCount = countForAssignment(ba, session.user.id, scoredCountByBatchSlot)
 
     batchesByProject.get(pid)!.push({
       id: ba.batch.id,
