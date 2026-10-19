@@ -98,7 +98,7 @@ export default function ResetPasswordTokenPage() {
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="At least 6 characters"
+                placeholder="At least 8 characters"
                 required
               />
             </div>

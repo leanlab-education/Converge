@@ -1,55 +1,40 @@
 import { auth } from '@/lib/auth'
-import { prisma } from '@/lib/db'
-import { createToken } from '@/lib/tokens'
-import { sendInviteEmail } from '@/lib/email'
+import { inviteUser } from '@/lib/invite'
 import { NextResponse } from 'next/server'
 
+// Global-admin-only invite behind the Accounts page (/admin/accounts): the one
+// path that can create a global admin. Project admins add annotators through
+// POST /api/projects/[projectId]/invite instead; both routes share their rules
+// via inviteUser().
 export async function POST(request: Request) {
   const session = await auth()
   if (!session?.user || session.user.role !== 'ADMIN') {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
-  const { email, name, projectId, role } = await request.json()
+  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null
+  const { email, name, projectId, role } = body ?? {}
 
-  if (!email) {
-    return NextResponse.json({ error: 'Email is required' }, { status: 400 })
+  const outcome = await inviteUser({
+    email,
+    name,
+    scope: {
+      kind: 'global',
+      role: role === 'ADMIN' ? 'ADMIN' : 'EVALUATOR',
+      projectId: typeof projectId === 'string' && projectId ? projectId : null,
+    },
+  })
+
+  if (!outcome.ok) {
+    return NextResponse.json({ error: outcome.error }, { status: outcome.status })
   }
 
-  const assignedRole = role === 'ADMIN' ? 'ADMIN' : 'EVALUATOR'
-  const normalizedEmail = email.trim().toLowerCase()
-
-  // Find or create user (no password)
-  let user = await prisma.user.findUnique({ where: { email: normalizedEmail } })
-
-  if (!user) {
-    user = await prisma.user.create({
-      data: {
-        email: normalizedEmail,
-        name: name?.trim() || null,
-        role: assignedRole,
-      },
-    })
-  }
-
-  // If projectId provided, assign to project
-  if (projectId) {
-    await prisma.projectEvaluator.upsert({
-      where: { projectId_userId: { projectId, userId: user.id } },
-      create: { projectId, userId: user.id },
-      update: {},
-    })
-  }
-
-  // Generate invite token and send email (only if user has no password)
-  if (!user.hashedPassword) {
-    const token = await createToken(normalizedEmail, 'INVITE')
-    await sendInviteEmail(normalizedEmail, token, user.name, user.role === 'ADMIN' ? 'admin' : 'annotator')
-  }
-
-  return NextResponse.json({
-    userId: user.id,
-    invited: !user.hashedPassword,
-    alreadyHasPassword: !!user.hashedPassword,
-  }, { status: 201 })
+  return NextResponse.json(
+    {
+      userId: outcome.userId,
+      invited: outcome.invited,
+      alreadyHasPassword: outcome.alreadyHasPassword,
+    },
+    { status: 201 }
+  )
 }
