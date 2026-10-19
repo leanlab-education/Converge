@@ -395,7 +395,12 @@ model Score {
   reconciledById  String?
 
   feedbackItem FeedbackItem    @relation(fields: [feedbackItemId], references: [id], onDelete: Cascade)
-  user         User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Restrict, not Cascade: scores are paid, irreplaceable annotation data, and
+  // reconciled finals are stored under the release owner's userId, so deleting
+  // one annotator would take the whole pair's finals with them. The users
+  // DELETE route refuses first; this is the database-level backstop.
+  // (docs/DATA-RESILIENCE.md)
+  user         User            @relation(fields: [userId], references: [id], onDelete: Restrict)
   dimension    RubricDimension @relation(fields: [dimensionId], references: [id], onDelete: Cascade)
   reconciledBy User?           @relation("ScoreReconciledBy", fields: [reconciledById], references: [id], onDelete: SetNull)
 
@@ -455,7 +460,9 @@ model Escalation {
   teamRelease  TeamBatchRelease @relation(fields: [teamReleaseId], references: [id], onDelete: Cascade)
   feedbackItem FeedbackItem     @relation(fields: [feedbackItemId], references: [id], onDelete: Cascade)
   dimension    RubricDimension  @relation(fields: [dimensionId], references: [id], onDelete: Cascade)
-  escalatedBy  User             @relation("EscalationEscalatedBy", fields: [escalatedById], references: [id], onDelete: Cascade)
+  // Restrict: an escalation is part of the reconciliation audit trail, so it
+  // must not vanish with the account that raised it (see Score.user).
+  escalatedBy  User             @relation("EscalationEscalatedBy", fields: [escalatedById], references: [id], onDelete: Restrict)
   resolvedBy   User?            @relation("EscalationResolvedBy", fields: [resolvedById], references: [id], onDelete: SetNull)
 
   @@unique([teamReleaseId, feedbackItemId, dimensionId])

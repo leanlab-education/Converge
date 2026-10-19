@@ -130,7 +130,12 @@ export function TeamClient({ users, currentUserId }: Props) {
   }
 
   async function handleDelete(user: User) {
-    if (!confirm(`Delete ${user.name || user.email}? This will remove all their scores, assignments, and team memberships. This cannot be undone.`)) return
+    if (
+      !confirm(
+        `Delete ${user.name || user.email}? This removes their account and their project and team memberships. Accounts with recorded scores or escalations cannot be deleted — remove them from their projects instead. This cannot be undone.`
+      )
+    )
+      return
 
     setActionLoading(user.id)
     try {
@@ -138,11 +143,13 @@ export function TeamClient({ users, currentUserId }: Props) {
       if (res.ok) {
         router.refresh()
       } else {
-        const err = await res.json()
-        alert(err.error || 'Failed to delete user')
+        // The server explains why (e.g. the account still holds scores).
+        const err = await res.json().catch(() => null)
+        alert(err?.error || 'Failed to delete user')
       }
     } catch (err) {
       console.error('Failed to delete user:', err)
+      alert('Something went wrong while deleting the account.')
     } finally {
       setActionLoading(null)
     }
