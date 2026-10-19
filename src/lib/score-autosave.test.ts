@@ -2,23 +2,48 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   ScoreAutosave,
   buildScorePayload,
+  combinePersistResults,
+  persistResultFromResponse,
   scoreSnapshot,
+  SAVE_FAILED_MESSAGE,
+  UNREACHABLE_MESSAGE,
   type AutosaveStatus,
+  type PersistResult,
 } from '@/lib/score-autosave'
 
+const RETRYABLE: PersistResult = { ok: false, message: 'HTTP 500', terminal: false }
+const TERMINAL: PersistResult = {
+  ok: false,
+  message: 'Scoring is not open for this release.',
+  terminal: true,
+}
+
 // A persist() whose promises are resolved by the test, so we can hold a save
-// "in flight" and make changes underneath it.
+// "in flight" and make changes underneath it. `resolve(true/false)` stands for
+// success / a retryable failure; pass a PersistResult for anything else.
 function deferredPersist() {
   const calls: {
     itemId: string
     payload: string
-    resolve: (ok: boolean) => void
+    resolve: (outcome: boolean | PersistResult) => void
     reject: (err: unknown) => void
   }[] = []
   const persist = vi.fn(
     (itemId: string, payload: string) =>
-      new Promise<boolean>((resolve, reject) => {
-        calls.push({ itemId, payload, resolve, reject })
+      new Promise<PersistResult>((resolve, reject) => {
+        calls.push({
+          itemId,
+          payload,
+          resolve: (outcome) =>
+            resolve(
+              typeof outcome === 'boolean'
+                ? outcome
+                  ? { ok: true }
+                  : RETRYABLE
+                : outcome
+            ),
+          reject,
+        })
       })
   )
   return { persist, calls }
@@ -32,15 +57,19 @@ async function tick() {
 function make(debounceMs = 1000) {
   const { persist, calls } = deferredPersist()
   const statuses: [string, AutosaveStatus][] = []
+  const messages: [string, AutosaveStatus, string | undefined][] = []
   const autosave = new ScoreAutosave<string>({
     debounceMs,
     persist,
-    onStatus: (id, s) => statuses.push([id, s]),
+    onStatus: (id, s, message) => {
+      statuses.push([id, s])
+      messages.push([id, s, message])
+    },
   })
   // Payload and snapshot are the same string here; the component derives
   // both from the same state, so that is faithful enough.
   const update = (id: string, state: string) => autosave.update(id, state, state)
-  return { autosave, persist, calls, statuses, update }
+  return { autosave, persist, calls, statuses, messages, update }
 }
 
 beforeEach(() => {
@@ -304,6 +333,198 @@ describe('ScoreAutosave serialization and failure handling', () => {
     await vi.advanceTimersByTimeAsync(5000)
     expect(persist).not.toHaveBeenCalled()
     expect(autosave.isDirty()).toBe(false)
+  })
+})
+
+describe('ScoreAutosave terminal failures (release closed, batch locked)', () => {
+  it('drops the item as clean with a notice: no retry, no unload warning, flush resolves false', async () => {
+    const { autosave, calls, update, messages, persist } = make()
+    update('F1', 'A')
+    const done = autosave.flush('F1')
+    await tick()
+    calls[0].resolve(TERMINAL)
+    await expect(done).resolves.toBe(false)
+    expect(autosave.isDirty()).toBe(false) // nothing left to warn about or retry
+    expect(messages.at(-1)).toEqual(['F1', 'rejected', TERMINAL.message])
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(persist).toHaveBeenCalledTimes(1)
+    // A later Retry/flush has nothing to send.
+    await expect(autosave.flush('F1')).resolves.toBe(true)
+    expect(persist).toHaveBeenCalledTimes(1)
+  })
+
+  it('also drops a change made during the rejected request (the server will refuse it too)', async () => {
+    const { autosave, calls, update } = make()
+    update('F1', 'A')
+    await vi.advanceTimersByTimeAsync(1000)
+    update('F1', 'A+B')
+    calls[0].resolve(TERMINAL)
+    await tick()
+    expect(autosave.isDirty('F1')).toBe(false)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('sends a fresh change after a rejection, so a reopened release can save again', async () => {
+    const { autosave, calls, update, messages } = make()
+    update('F1', 'A')
+    await vi.advanceTimersByTimeAsync(1000)
+    calls[0].resolve(TERMINAL)
+    await tick()
+    update('F1', 'A+B')
+    expect(messages.at(-1)).toEqual(['F1', 'idle', undefined]) // the notice clears
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(calls.map((c) => c.payload)).toEqual(['A', 'A+B'])
+    calls[1].resolve(true)
+    await tick()
+    expect(autosave.isDirty()).toBe(false)
+  })
+
+  it('a retryable failure keeps the item dirty and carries the server message', async () => {
+    const { autosave, calls, update, messages } = make()
+    update('F1', 'A')
+    await vi.advanceTimersByTimeAsync(1000)
+    calls[0].resolve({ ok: false, message: 'Database unavailable', terminal: false })
+    await tick()
+    expect(autosave.isDirty('F1')).toBe(true)
+    expect(messages.at(-1)).toEqual(['F1', 'error', 'Database unavailable'])
+  })
+
+  it('a throwing persist is a retryable failure with the unreachable message', async () => {
+    const { autosave, calls, update, messages } = make()
+    update('F1', 'A')
+    await vi.advanceTimersByTimeAsync(1000)
+    calls[0].reject(new TypeError('Failed to fetch'))
+    await tick()
+    expect(autosave.isDirty('F1')).toBe(true)
+    expect(messages.at(-1)).toEqual(['F1', 'error', UNREACHABLE_MESSAGE])
+  })
+
+  it('flushAll lets the caller leave: false, but nothing dirty', async () => {
+    const { autosave, calls, update } = make()
+    update('F1', 'A')
+    update('F2', 'X')
+    const done = autosave.flushAll()
+    await tick()
+    calls[0].resolve(TERMINAL)
+    await tick()
+    calls[1].resolve(TERMINAL)
+    await expect(done).resolves.toBe(false)
+    expect(autosave.isDirty()).toBe(false)
+  })
+})
+
+describe('ScoreAutosave.flushAllNow (beforeunload)', () => {
+  it('fires every dirty item at once instead of one at a time', async () => {
+    const { autosave, calls, update } = make()
+    update('F1', 'A')
+    update('F2', 'X')
+    update('F3', 'Q')
+    autosave.markSaved('F4', 'Z')
+    update('F4', 'Z')
+    const done = autosave.flushAllNow()
+    expect(calls.map((c) => c.itemId)).toEqual(['F1', 'F2', 'F3']) // all out synchronously
+    calls.forEach((c) => c.resolve(true))
+    await expect(done).resolves.toBe(true)
+    expect(autosave.isDirty()).toBe(false)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(calls).toHaveLength(3) // the cancelled debounces never fire duplicates
+  })
+
+  it('leaves an item that is already in flight alone and lets its landing re-queue it', async () => {
+    const { autosave, calls, update } = make()
+    update('F1', 'A')
+    await vi.advanceTimersByTimeAsync(1000) // F1 in flight via the queue
+    update('F1', 'A+B')
+    update('F2', 'X')
+    void autosave.flushAllNow()
+    expect(calls.map((c) => c.itemId)).toEqual(['F1', 'F2']) // F1 not sent twice
+    calls[1].resolve(true)
+    calls[0].resolve(true)
+    await tick()
+    // F1 changed during flight → its follow-up goes out through the queue.
+    expect(calls.map((c) => [c.itemId, c.payload])).toEqual([
+      ['F1', 'A'],
+      ['F2', 'X'],
+      ['F1', 'A+B'],
+    ])
+    calls[2].resolve(true)
+    await tick()
+    expect(autosave.isDirty()).toBe(false)
+  })
+
+  it('does not let the queue double-send an item flushAllNow already has out', async () => {
+    const { autosave, calls, update } = make()
+    update('F1', 'A')
+    void autosave.flushAllNow()
+    expect(calls).toHaveLength(1)
+    const waited = autosave.flush('F1') // e.g. the user clicks a nav circle
+    await tick()
+    expect(calls).toHaveLength(1)
+    calls[0].resolve(true)
+    await expect(waited).resolves.toBe(true)
+  })
+
+  it('reports false when any of the concurrent saves failed, keeping that item dirty', async () => {
+    const { autosave, calls, update } = make()
+    update('F1', 'A')
+    update('F2', 'X')
+    const done = autosave.flushAllNow()
+    calls[0].resolve(true)
+    calls[1].resolve(false)
+    await expect(done).resolves.toBe(false)
+    expect(autosave.isDirty('F1')).toBe(false)
+    expect(autosave.isDirty('F2')).toBe(true)
+  })
+})
+
+describe('persistResultFromResponse', () => {
+  const json = (status: number, body?: unknown) =>
+    new Response(body === undefined ? null : JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+  it('is ok for a 2xx', async () => {
+    await expect(persistResultFromResponse(json(200, { saved: true }))).resolves.toEqual({ ok: true })
+  })
+
+  it('is terminal with the server message for 403, 404 and 423', async () => {
+    for (const status of [403, 404, 423]) {
+      await expect(persistResultFromResponse(json(status, { error: 'nope' }))).resolves.toEqual({
+        ok: false,
+        message: 'nope',
+        terminal: true,
+      })
+    }
+  })
+
+  it('is retryable for other failures, falling back to a generic message without a JSON body', async () => {
+    await expect(persistResultFromResponse(json(500))).resolves.toEqual({
+      ok: false,
+      message: SAVE_FAILED_MESSAGE,
+      terminal: false,
+    })
+    await expect(persistResultFromResponse(json(400, { error: 'bad value' }))).resolves.toEqual({
+      ok: false,
+      message: 'bad value',
+      terminal: false,
+    })
+    await expect(
+      persistResultFromResponse(new Response('<html>gateway</html>', { status: 502 }))
+    ).resolves.toEqual({ ok: false, message: SAVE_FAILED_MESSAGE, terminal: false })
+  })
+})
+
+describe('combinePersistResults', () => {
+  it('is ok only when every request was', () => {
+    expect(combinePersistResults([{ ok: true }, { ok: true }])).toEqual({ ok: true })
+    expect(combinePersistResults([])).toEqual({ ok: true })
+  })
+
+  it('prefers a terminal failure over a retryable one, else the first failure', () => {
+    expect(combinePersistResults([{ ok: true }, RETRYABLE, TERMINAL])).toEqual(TERMINAL)
+    const other: PersistResult = { ok: false, message: 'later', terminal: false }
+    expect(combinePersistResults([{ ok: true }, RETRYABLE, other])).toEqual(RETRYABLE)
   })
 })
 
