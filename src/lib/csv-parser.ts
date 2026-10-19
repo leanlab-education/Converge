@@ -136,10 +136,49 @@ export function validateCSVRow(
   if (!row.Feedback_Text) return `Row ${index + 1}: missing Feedback_Text`
   if (!row.Student_Text) return `Row ${index + 1}: missing Student_Text`
 
-  const source = row.Feedback_Source?.toUpperCase()
-  if (source && source !== 'AI' && source !== 'HUMAN') {
+  // Feedback_Source is the one column the study is blind to and the export
+  // later reveals as fact, so it is required: a blank (or a header the alias
+  // table does not recognise) must fail here, never default to AI.
+  if (!row.Feedback_Source) {
+    return `Row ${index + 1}: missing Feedback_Source (must be "AI" or "HUMAN")`
+  }
+  if (normalizeFeedbackSource(row.Feedback_Source) === null) {
     return `Row ${index + 1}: Feedback_Source must be "AI" or "HUMAN", got "${row.Feedback_Source}"`
   }
 
   return null
+}
+
+export type NormalizedFeedbackSource = 'AI' | 'HUMAN'
+
+/** Case-insensitive AI/HUMAN parse; null for anything else (incl. blank). */
+export function normalizeFeedbackSource(
+  value: unknown
+): NormalizedFeedbackSource | null {
+  if (typeof value !== 'string') return null
+  const upper = value.trim().toUpperCase()
+  return upper === 'AI' || upper === 'HUMAN' ? upper : null
+}
+
+/**
+ * In-file duplicate Feedback_IDs. Within one project Feedback_ID is the unique
+ * key, so a file that repeats one can only import one of the rows — rather than
+ * silently keeping the first, surface it so the researcher fixes the file.
+ * Returns one message per duplicated id, naming every 1-based row it occurs on.
+ */
+export function findDuplicateFeedbackIds(rows: { Feedback_ID: string }[]): string[] {
+  const rowsById = new Map<string, number[]>()
+  rows.forEach((row, index) => {
+    const id = row.Feedback_ID?.trim()
+    if (!id) return
+    const list = rowsById.get(id) ?? []
+    list.push(index + 1)
+    rowsById.set(id, list)
+  })
+  return [...rowsById.entries()]
+    .filter(([, rowNumbers]) => rowNumbers.length > 1)
+    .map(
+      ([id, rowNumbers]) =>
+        `Feedback_ID "${id}" appears ${rowNumbers.length} times (rows ${rowNumbers.join(', ')})`
+    )
 }

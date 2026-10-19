@@ -246,16 +246,26 @@ export function BatchCreator({
   }
 
   async function handleDeleteBatch(batchId: string) {
-    if (!confirm('Delete this batch? Items will return to the unbatched pool.')) return
+    if (
+      !confirm(
+        'Delete this batch? Its items return to the unbatched pool and lose their slot and display order. Batches with recorded scores cannot be deleted.'
+      )
+    )
+      return
     try {
       const response = await fetch(`/api/projects/${projectId}/batches/${batchId}`, {
         method: 'DELETE',
       })
       if (response.ok) {
         await onBatchesChange()
+      } else {
+        // The server explains why (e.g. the batch still holds scores).
+        const payload = await response.json().catch(() => null)
+        alert(payload?.error || 'Failed to delete batch')
       }
     } catch (error) {
       console.error('Failed to delete batch:', error)
+      alert('Something went wrong while deleting the batch.')
     }
   }
 
@@ -290,11 +300,17 @@ export function BatchCreator({
       if (response.ok) {
         await onBatchesChange({ silent: true })
       } else {
+        // Snap the optimistic update back AND say why — the server's reasons
+        // ("adjudicator cannot be a team member", locked batch) are the whole
+        // point of the refusal.
+        const payload = await response.json().catch(() => null)
         setLocalBatches(previousBatches)
+        alert(payload?.error || 'Failed to update team release')
       }
     } catch (error) {
       setLocalBatches(previousBatches)
       console.error('Failed to update team release:', error)
+      alert('Something went wrong while updating the team release.')
     }
   }
 
@@ -333,6 +349,7 @@ export function BatchCreator({
       }
     } catch (error) {
       console.error('Failed to toggle criterion unlock:', error)
+      window.alert('Something went wrong while updating the re-open state.')
     }
   }
 

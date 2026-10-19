@@ -14,6 +14,8 @@
 // Legacy names (`original`, `reconciled`) are still accepted by the route so
 // existing bookmarks and scripts keep working.
 
+import { compareFeedbackIds } from '@/lib/feedback-id'
+
 export type ExportKind =
   | 'raw-by-scorer' // every annotator's raw score, one row per (item × scorer)
   | 'final-by-scorer' // final values, still split by scorer/team
@@ -167,6 +169,29 @@ export function formatScoringRole(rawRole: string): string {
   return rawRole
 }
 
+/**
+ * The Scoring_Role label for one (batch × scorer).
+ *
+ * On a paired batch — double-scored regular or TRAINING — the label is the
+ * member's position in their team (email ascending): Scorer A, Scorer B. The
+ * stored PRIMARY/DOUBLE role cannot be used there because it is only assigned
+ * when the batch is double-scored; a training pair is stored PRIMARY/PRIMARY,
+ * which labelled both annotators "Scorer A". For double-scored batches the
+ * position-derived label equals the stored one, so that output is unchanged.
+ * Unpaired (independent) batches keep the stored-role mapping.
+ */
+export function scoringRoleLabel(input: {
+  scoringRole: string
+  isPaired: boolean
+  /** Index of the scorer in their team's members (email asc); null if not on the team. */
+  memberIndex: number | null
+}): string {
+  if (input.isPaired && input.memberIndex !== null && input.memberIndex >= 0) {
+    return `Scorer ${String.fromCharCode(65 + input.memberIndex)}`
+  }
+  return formatScoringRole(input.scoringRole)
+}
+
 export interface ScorerGrainInput {
   feedbackItemId: string
   userId: string
@@ -198,6 +223,7 @@ export function buildScorerGrainRows(
   scores: ScorerGrainInput[],
   lookups: {
     teamByUserId: Map<string, string>
+    /** `${batchId}::${userId}` → display label (see scoringRoleLabel). */
     roleByBatchUser: Map<string, string>
   }
 ): ScorerGrainRow[] {
@@ -208,7 +234,7 @@ export function buildScorerGrainRows(
     const rowKey = `${score.feedbackItemId}::${score.userId}`
     if (!rowMap.has(rowKey)) {
       scoreCounter++
-      const rawRole = score.batchId
+      const scoringRole = score.batchId
         ? lookups.roleByBatchUser.get(`${score.batchId}::${score.userId}`) || ''
         : ''
 
@@ -217,7 +243,7 @@ export function buildScorerGrainRows(
         ...score.batch,
         scoreId: `S${String(scoreCounter).padStart(3, '0')}`,
         evaluatorEmail: score.userEmail,
-        scoringRole: formatScoringRole(rawRole),
+        scoringRole,
         teamName: lookups.teamByUserId.get(score.userId) || '',
         notes: score.notes ?? '',
         timestamp: score.scoredAt,
@@ -290,6 +316,19 @@ export interface ItemGrainRow extends ExportItemFields, ExportBatchFields {
   dimensionScores: Record<string, number>
 }
 
+/** An (item × criterion) cell that had more than one distinct final candidate. */
+export interface ItemGrainConflict {
+  feedbackItemId: string
+  feedbackId: string
+  dimensionKey: string
+  values: number[]
+}
+
+export interface ItemGrainResult {
+  rows: ItemGrainRow[]
+  conflicts: ItemGrainConflict[]
+}
+
 /**
  * Collapse final scores to one row per feedback item, merging across every team
  * and both members of each pair.
@@ -299,16 +338,21 @@ export interface ItemGrainRow extends ExportItemFields, ExportBatchFields {
  * cells. That is what makes the "only items with a full set of scores" filter
  * meaningful rather than tautological.
  *
- * Each (item × dimension) has at most one final value: reconciled rows are
- * always written under the release owner, and in a REGULAR batch a dimension
- * belongs to exactly one team — so exactly one release owns each cell. (This is
- * why TRAINING batches are excluded upstream: there, every team scores every
- * dimension, so an item genuinely has one final per team and cannot collapse.)
+ * Each (item × dimension) should have exactly one final value: reconciled rows
+ * are written under the release owner, in a REGULAR batch a dimension belongs
+ * to one team, and on an independent batch the caller passes only the expected
+ * scorer's raw score. (TRAINING batches are excluded upstream: there every team
+ * scores every dimension, so an item genuinely has one final per team.) If the
+ * data breaks that invariant — two teams configured with the same criterion, a
+ * reconciled row alongside a raw one — and the candidates DISAGREE, the cell is
+ * left blank and reported as a conflict rather than resolved by whichever row
+ * the database happened to return last. Candidates that agree collapse to that
+ * value: the cell is unambiguous even if the rows are redundant.
  */
 export function buildItemGrainRows(
   items: ItemGrainItem[],
   scores: ItemGrainScore[]
-): ItemGrainRow[] {
+): ItemGrainResult {
   const rowMap = new Map<string, ItemGrainRow>()
 
   for (const entry of items) {
@@ -320,15 +364,42 @@ export function buildItemGrainRows(
     })
   }
 
+  // (item, dimension) → every distinct candidate value, in encounter order.
+  const candidates = new Map<string, { row: ItemGrainRow; dimensionKey: string; values: number[] }>()
   for (const score of scores) {
     const row = rowMap.get(score.feedbackItemId)
     // Scores for items outside the requested scope are ignored rather than
     // silently reintroducing those items.
     if (!row) continue
-    row.dimensionScores[score.dimensionKey] = score.value
+    const key = `${score.feedbackItemId}::${score.dimensionKey}`
+    let cell = candidates.get(key)
+    if (!cell) {
+      cell = { row, dimensionKey: score.dimensionKey, values: [] }
+      candidates.set(key, cell)
+    }
+    if (!cell.values.includes(score.value)) cell.values.push(score.value)
   }
 
-  return [...rowMap.values()]
+  const conflicts: ItemGrainConflict[] = []
+  for (const cell of candidates.values()) {
+    if (cell.values.length === 1) {
+      cell.row.dimensionScores[cell.dimensionKey] = cell.values[0]
+    } else {
+      conflicts.push({
+        feedbackItemId: cell.row.feedbackItemId,
+        feedbackId: cell.row.feedbackId,
+        dimensionKey: cell.dimensionKey,
+        values: cell.values,
+      })
+    }
+  }
+
+  // Numeric Feedback_ID order (F2 before F10), matching the batch builder and
+  // the discrepancy report, regardless of the order the query returned.
+  const rows = [...rowMap.values()].sort((a, b) =>
+    compareFeedbackIds(a.feedbackId, b.feedbackId)
+  )
+  return { rows, conflicts }
 }
 
 export function itemGrainHeader(dimensionLabels: string[]): string[] {
@@ -393,6 +464,13 @@ export const DISCREPANCY_COLUMNS = [
   'Final_Recorded_By',
   'Reconciliation_Notes',
 ] as const
+
+/**
+ * The note the system writes on a final it reconciled itself because the pair
+ * agreed (src/lib/reconciliation.ts). It is a marker, not a rationale, so the
+ * report never shows it as a pair's reconciliation note.
+ */
+export const AUTO_RECONCILED_NOTE = 'Auto-reconciled (scores matched)'
 
 export type DiscrepancyResolution =
   | 'Reconciled' // the pair recorded a final value themselves
@@ -502,13 +580,18 @@ export function buildDiscrepancyRows(
     )
   }
 
-  // The reconcile route writes the pair's rationale onto every reconciled
-  // dimension row for an item, so a rationale on one criterion applies to the
-  // item as a whole for that team.
+  // Reconciliation_Notes: the rationale on the final for THIS criterion when it
+  // has one. The reconcile route writes the pair's rationale onto every
+  // reconciled dimension row for an item, so when the same-criterion final has
+  // no note the first real note on any of the item's finals for that team
+  // stands in — skipping the system's auto-reconcile marker, which is not a
+  // rationale and must never be printed as one.
+  const isRationale = (notes: string | null | undefined): notes is string =>
+    Boolean(notes?.trim()) && notes !== AUTO_RECONCILED_NOTE
   const rationaleByItemTeam = new Map<string, string>()
   for (const final of finals) {
     const key = `${final.feedbackItemId}::${teamOf(final.ownerUserId).id}`
-    if (final.notes?.trim() && !rationaleByItemTeam.has(key)) {
+    if (isRationale(final.notes) && !rationaleByItemTeam.has(key)) {
       rationaleByItemTeam.set(key, final.notes)
     }
   }
@@ -585,17 +668,20 @@ export function buildDiscrepancyRows(
       resolution,
       finalRecordedBy: final?.recordedByEmail ?? '',
       reconciliationNotes:
-        rationaleByItemTeam.get(`${first.feedbackItemId}::${group.teamId}`) ?? '',
+        final && isRationale(final.notes)
+          ? final.notes
+          : (rationaleByItemTeam.get(`${first.feedbackItemId}::${group.teamId}`) ?? ''),
     })
   }
 
-  // Stable, readable order: batch, then item, then criterion in rubric order,
-  // then team (only distinguishes rows in training batches).
+  // Stable, readable order: batch, then item (numeric Feedback_ID order, so
+  // F2 precedes F10), then criterion in rubric order, then team (only
+  // distinguishes rows in training batches).
   rows.sort(
     (x, y) =>
       x.batchSortOrder - y.batchSortOrder ||
       x.batchName.localeCompare(y.batchName) ||
-      x.feedbackId.localeCompare(y.feedbackId) ||
+      compareFeedbackIds(x.feedbackId, y.feedbackId) ||
       x.dimensionSortOrder - y.dimensionSortOrder ||
       x.teamName.localeCompare(y.teamName)
   )
@@ -641,7 +727,7 @@ export function buildDiscrepancyFilename(
 ): string {
   const middle =
     selection.kind === 'batch'
-      ? (selection.batchName || 'batch').replace(/[^a-zA-Z0-9_-]/g, '-')
+      ? sanitizeFilenamePart(selection.batchName || 'batch')
       : selection.completeBatchesOnly
         ? 'all-double-scored-complete'
         : 'all-double-scored'
@@ -651,6 +737,15 @@ export function buildDiscrepancyFilename(
 // ---------------------------------------------------------------------------
 // Filenames
 // ---------------------------------------------------------------------------
+
+/**
+ * User-controlled values (batch names, activity/conjunction ids) go into the
+ * Content-Disposition filename; anything outside [A-Za-z0-9_-] becomes '-' so
+ * a stray quote, slash or space can't break the header or the saved name.
+ */
+export function sanitizeFilenamePart(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]/g, '-')
+}
 
 const KIND_FILENAME_SLUGS: Record<ExportKind, string> = {
   'raw-by-scorer': 'original',
@@ -670,8 +765,8 @@ export function buildExportFilename(
   today: string
 ): string {
   const parts = [KIND_FILENAME_SLUGS[kind]]
-  if (filters.activityId) parts.push(`activity-${filters.activityId}`)
-  if (filters.conjunctionId) parts.push(`conj-${filters.conjunctionId}`)
+  if (filters.activityId) parts.push(`activity-${sanitizeFilenamePart(filters.activityId)}`)
+  if (filters.conjunctionId) parts.push(`conj-${sanitizeFilenamePart(filters.conjunctionId)}`)
   if (filters.completeItemsOnly) parts.push('complete-items')
   if (filters.finalizedBatchesOnly) parts.push('finalized-batches')
   return `scores-${parts.join('-')}-${today}.csv`

@@ -1,6 +1,6 @@
 import { auth } from '@/lib/auth'
 import { canAdminProject } from '@/lib/authorization'
-import { prisma } from '@/lib/db'
+import { loadAdminProjectStats } from '@/lib/evaluator-stats'
 import { NextRequest, NextResponse } from 'next/server'
 
 export async function GET(
@@ -18,17 +18,12 @@ export async function GET(
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
-  // Count unique feedback items that have at least one score
-  const scoredItems = await prisma.score.findMany({
-    where: {
-      feedbackItem: { projectId },
-      isReconciled: false,
-    },
-    select: { feedbackItemId: true },
-    distinct: ['feedbackItemId'],
-  })
+  // Items where every owed criterion has a raw score from an expected scorer —
+  // the same figure the project page's Overview tab renders. An item with one
+  // of eight criteria saved is not scored.
+  const { fullyScoredItemCount } = await loadAdminProjectStats(projectId)
 
   return NextResponse.json({
-    scoredItemCount: scoredItems.length,
+    scoredItemCount: fullyScoredItemCount,
   })
 }

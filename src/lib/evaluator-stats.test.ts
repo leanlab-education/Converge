@@ -2,10 +2,14 @@
 import { prismaMock } from '../../test/prisma-mock'
 import { describe, it, expect } from 'vitest'
 import {
+  buildFullyScoredItemIds,
   buildItemCountMap,
   buildScoredCountMaps,
   countForAssignment,
+  createExpectedScoreFilter,
   expectedDimensionIdsForAssignment,
+  isVisibleToAnnotator,
+  loadAdminProjectStats,
   loadSlotMaps,
   type BatchAssignmentForScoredStats,
   type BatchAssignmentForStats,
@@ -261,5 +265,199 @@ describe('loadSlotMaps', () => {
     expect(scoredCountByUser.size).toBe(0)
     expect(prismaMock.score.findMany).not.toHaveBeenCalled()
     expect(prismaMock.feedbackItem.findMany).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Expected-scorer predicate: which raw scores are candidates for "the" score of
+// an (item × criterion). Shared by the Overview count and the export.
+// ---------------------------------------------------------------------------
+
+describe('createExpectedScoreFilter', () => {
+  const splitItems: ItemForStats[] = [
+    { id: 'i1', batchId: 'B', slotIndex: 0 },
+    { id: 'i2', batchId: 'B', slotIndex: 1 },
+    { id: 'u1x', batchId: null, slotIndex: null },
+  ]
+
+  it('accepts a score by the assigned scorer on an owed criterion inside their slot', () => {
+    const a0 = scoredBa({ userId: 'u0', batch: { isDoubleScored: false } })
+    const a1 = scoredBa({ userId: 'u1', batch: { isDoubleScored: false } })
+    const isExpected = createExpectedScoreFilter([a0, a1], projectDims, splitItems)
+    expect(isExpected(raw('u0', 'i1', 'd1'))).toBe(true)
+    expect(isExpected(raw('u1', 'i2', 'd2'))).toBe(true)
+  })
+
+  it('rejects a partner scoring outside their slot on an independent batch', () => {
+    const a0 = scoredBa({ userId: 'u0', batch: { isDoubleScored: false } })
+    const a1 = scoredBa({ userId: 'u1', batch: { isDoubleScored: false } })
+    const isExpected = createExpectedScoreFilter([a0, a1], projectDims, splitItems)
+    expect(isExpected(raw('u0', 'i2', 'd1'))).toBe(false)
+    expect(isExpected(raw('u1', 'i1', 'd1'))).toBe(false)
+  })
+
+  it('rejects a criterion the scorer’s team does not own', () => {
+    const isExpected = createExpectedScoreFilter([scoredBa()], projectDims, ITEMS)
+    expect(isExpected(raw('u0', 'i1', 'd3'))).toBe(false)
+  })
+
+  it('rejects anyone without an assignment on the batch (e.g. an admin)', () => {
+    const isExpected = createExpectedScoreFilter([scoredBa()], projectDims, ITEMS)
+    expect(isExpected(raw('admin', 'i1', 'd1'))).toBe(false)
+  })
+
+  it('rejects scores on unknown or unbatched items', () => {
+    const isExpected = createExpectedScoreFilter([scoredBa()], projectDims, splitItems)
+    expect(isExpected(raw('u0', 'ghost', 'd1'))).toBe(false)
+    expect(isExpected(raw('u0', 'u1x', 'd1'))).toBe(false)
+  })
+
+  it('accepts both members on every item of a double-scored or training batch', () => {
+    const dbl = [scoredBa({ userId: 'u0' }), scoredBa({ userId: 'u1' })]
+    const isExpected = createExpectedScoreFilter(dbl, projectDims, splitItems)
+    expect(isExpected(raw('u0', 'i2', 'd1'))).toBe(true)
+    expect(isExpected(raw('u1', 'i1', 'd2'))).toBe(true)
+    const training = [scoredBa({ userId: 'u0', batch: { type: 'TRAINING', isDoubleScored: false } })]
+    expect(createExpectedScoreFilter(training, projectDims, splitItems)(raw('u0', 'i2', 'd4'))).toBe(true)
+  })
+
+  it('accepts only the named scorer on a single-scorer release', () => {
+    const named = [
+      scoredBa({ userId: 'u0', batch: { isDoubleScored: false }, teamRelease: { scorerUserId: 'u0' } }),
+    ]
+    const isExpected = createExpectedScoreFilter(named, projectDims, splitItems)
+    expect(isExpected(raw('u0', 'i2', 'd1'))).toBe(true) // all items, not a slot half
+    expect(isExpected(raw('u1', 'i1', 'd1'))).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Overview "Scored": every owed criterion has a score from an expected scorer.
+// ---------------------------------------------------------------------------
+
+describe('buildFullyScoredItemIds', () => {
+  // Two teams on batch B: team 1 (u0,u1) owns d1,d2; team 2 (u2,u3) owns d3,d4.
+  const team2 = [{ userId: 'u2' }, { userId: 'u3' }]
+  const TEAM2_DIMS = [{ dimensionId: 'd3' }, { dimensionId: 'd4' }]
+  function team2Ba(userId: string, batch: Partial<BatchAssignmentForScoredStats['batch']> = {}) {
+    return scoredBa({ userId, batch, teamRelease: { id: 'r2', team: { members: team2, dimensions: TEAM2_DIMS } } })
+  }
+  const twoTeamsDouble = [scoredBa({ userId: 'u0' }), scoredBa({ userId: 'u1' }), team2Ba('u2'), team2Ba('u3')]
+
+  function fully(assignments: BatchAssignmentForScoredStats[], scores: RawScoreForStats[], items = ITEMS) {
+    return [...buildFullyScoredItemIds(assignments, projectDims, items, scores)].sort()
+  }
+
+  it('does not count an item with only some of its criteria scored (the old any-score proxy did)', () => {
+    expect(fully(twoTeamsDouble, [raw('u0', 'i1', 'd1')])).toEqual([])
+    // Team 1 complete, team 2 untouched: still owed d3/d4.
+    expect(fully(twoTeamsDouble, [raw('u0', 'i1', 'd1'), raw('u0', 'i1', 'd2')])).toEqual([])
+  })
+
+  it('counts an item once every owed criterion has a score from at least one expected scorer', () => {
+    const scores = [
+      raw('u0', 'i1', 'd1'),
+      raw('u1', 'i1', 'd2'), // d2 came from the partner — one expected scorer suffices
+      raw('u3', 'i1', 'd3'),
+      raw('u2', 'i1', 'd4'),
+    ]
+    expect(fully(twoTeamsDouble, scores)).toEqual(['i1'])
+  })
+
+  it('ignores stray scores from people with no assignment and from criteria another team owns', () => {
+    const scores = [
+      raw('u0', 'i1', 'd1'),
+      raw('u0', 'i1', 'd2'),
+      raw('admin', 'i1', 'd3'), // not assigned
+      raw('u0', 'i1', 'd4'), // team 1 does not own d4
+    ]
+    expect(fully(twoTeamsDouble, scores)).toEqual([])
+  })
+
+  it('only looks at the slot member’s scores on an independent batch', () => {
+    const indep = [
+      scoredBa({ userId: 'u0', batch: { isDoubleScored: false } }),
+      scoredBa({ userId: 'u1', batch: { isDoubleScored: false } }),
+    ]
+    const splitItems: ItemForStats[] = [
+      { id: 'i1', batchId: 'B', slotIndex: 0 },
+      { id: 'i2', batchId: 'B', slotIndex: 1 },
+    ]
+    const scores = [
+      raw('u0', 'i1', 'd1'),
+      raw('u0', 'i1', 'd2'),
+      // u0 also scored i2, which is u1's — must not make i2 count.
+      raw('u0', 'i2', 'd1'),
+      raw('u0', 'i2', 'd2'),
+    ]
+    expect(fully(indep, scores, splitItems)).toEqual(['i1'])
+  })
+
+  it('never counts an item whose batch has no assignments', () => {
+    expect(fully([], [raw('u0', 'i1', 'd1'), raw('u0', 'i1', 'd2')])).toEqual([])
+    // OTHER batch has no assignments even though B does.
+    expect(fully([scoredBa()], [raw('u0', 'o1', 'd1'), raw('u0', 'o1', 'd2')])).toEqual([])
+  })
+
+  it('requires every project criterion on a TRAINING batch', () => {
+    const training = [scoredBa({ userId: 'u0', batch: { type: 'TRAINING', isDoubleScored: false } })]
+    const three = ['d1', 'd2', 'd3'].map((d) => raw('u0', 'i1', d))
+    expect(fully(training, three)).toEqual([])
+    expect(fully(training, [...three, raw('u0', 'i1', 'd4')])).toEqual(['i1'])
+  })
+})
+
+describe('isVisibleToAnnotator', () => {
+  it('hides assignments on hidden batches and on unreleased team releases', () => {
+    expect(isVisibleToAnnotator({ batch: { isHidden: false }, teamRelease: { isVisible: true } })).toBe(true)
+    expect(isVisibleToAnnotator({ batch: { isHidden: false }, teamRelease: null })).toBe(true)
+    expect(isVisibleToAnnotator({ batch: { isHidden: true }, teamRelease: { isVisible: true } })).toBe(false)
+    expect(isVisibleToAnnotator({ batch: { isHidden: false }, teamRelease: { isVisible: false } })).toBe(false)
+  })
+})
+
+describe('loadAdminProjectStats', () => {
+  it('counts per-user progress over visible assignments only, but owes criteria from every assignment', async () => {
+    // Batch B (visible) and batch H (hidden) both double-scored by u0/u1 on d1,d2.
+    const visibleBa = {
+      userId: 'u0',
+      teamRelease: { id: 'r', scorerUserId: null, isVisible: true, team: { members, dimensions: TEAM_DIMS } },
+      batch: { id: 'B', projectId: PROJECT, isDoubleScored: true, type: 'REGULAR', isHidden: false },
+    }
+    const hiddenBa = {
+      ...visibleBa,
+      teamRelease: { ...visibleBa.teamRelease, id: 'rh' },
+      batch: { ...visibleBa.batch, id: 'H', isHidden: true },
+    }
+    prismaMock.batchAssignment.findMany.mockResolvedValue([visibleBa, hiddenBa] as never)
+    prismaMock.rubricDimension.findMany.mockResolvedValue(
+      PROJECT_DIMS.map((id) => ({ id, projectId: PROJECT })) as never
+    )
+    prismaMock.feedbackItem.findMany.mockResolvedValue([
+      { id: 'i1', batchId: 'B', slotIndex: null },
+      { id: 'i2', batchId: 'B', slotIndex: null },
+      { id: 'h1', batchId: 'H', slotIndex: null },
+    ] as never)
+    prismaMock.score.findMany.mockResolvedValue([
+      raw('u0', 'i1', 'd1'),
+      raw('u0', 'i1', 'd2'),
+      raw('u0', 'h1', 'd1'),
+      raw('u0', 'h1', 'd2'),
+    ] as never)
+
+    const stats = await loadAdminProjectStats(PROJECT)
+
+    // Assigned/Completed exclude the hidden batch: 2 assigned, 1 complete — not 3/2.
+    expect(stats.progressByUser.get('u0')).toEqual({ assignedCount: 2, completedCount: 1 })
+    // The Overview still counts the hidden batch's fully scored item.
+    expect(stats.fullyScoredItemCount).toBe(2)
+  })
+
+  it('returns zeros without loading items or scores when the project has no assignments', async () => {
+    prismaMock.batchAssignment.findMany.mockResolvedValue([] as never)
+    const stats = await loadAdminProjectStats(PROJECT)
+    expect(stats.fullyScoredItemCount).toBe(0)
+    expect(stats.progressByUser.size).toBe(0)
+    expect(prismaMock.score.findMany).not.toHaveBeenCalled()
   })
 })

@@ -91,7 +91,7 @@ export async function GET(request: NextRequest) {
   }
 
   const scope = parseExportScope(params, projectId)
-  const { header, rows } = await buildExportCsv(
+  const { header, rows, conflicts } = await buildExportCsv(
     kind,
     scope,
     dimensionKeys,
@@ -100,16 +100,20 @@ export async function GET(request: NextRequest) {
 
   return csvResponse(
     toCsv(header, rows),
-    buildExportFilename(kind, scope, today)
+    buildExportFilename(kind, scope, today),
+    conflicts.length
   )
 }
 
-function csvResponse(csv: string, filename: string) {
+function csvResponse(csv: string, filename: string, conflictCount = 0) {
   return new Response(csv, {
     status: 200,
     headers: {
       'Content-Type': 'text/csv',
       'Content-Disposition': `attachment; filename="${filename}"`,
+      // Cells left blank because more than one distinct final existed for an
+      // (item × criterion). 0 means every cell in the file is unambiguous.
+      'X-Export-Conflicts': String(conflictCount),
     },
   })
 }

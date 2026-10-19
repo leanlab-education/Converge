@@ -14,7 +14,12 @@ import {
 } from '@/components/ui/table'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Upload, ArrowLeft, CheckCircle, Loader2, FileText } from 'lucide-react'
-import { parseCSV, validateCSVRow, type FeedbackCSVRow } from '@/lib/csv-parser'
+import {
+  findDuplicateFeedbackIds,
+  parseCSV,
+  validateCSVRow,
+  type FeedbackCSVRow,
+} from '@/lib/csv-parser'
 import { AppShell } from '@/components/app-shell'
 
 export function ImportClient({ projectId }: { projectId: string }) {
@@ -57,6 +62,9 @@ export function ImportClient({ projectId }: { projectId: string }) {
         const err = validateCSVRow(row, i)
         if (err) validationErrors.push(err)
       })
+      // A repeated Feedback_ID can only import once (it is the unique key within
+      // a project), so flag it here rather than letting the server drop a row.
+      validationErrors.push(...findDuplicateFeedbackIds(parsed))
 
       setRows(parsed)
       setErrors(validationErrors)
@@ -110,7 +118,9 @@ export function ImportClient({ projectId }: { projectId: string }) {
             feedbackId: row.Feedback_ID,
             teacherId: row.Teacher_ID || null,
             feedbackText: row.Feedback_Text,
-            feedbackSource: row.Feedback_Source || 'AI',
+            // Validated AI/HUMAN above; never defaulted — a blank source is a
+            // file error, not an AI item (the export unblinds this column).
+            feedbackSource: row.Feedback_Source,
             optimal: row.optimal || null,
             feedbackType: row.feedback_type || null,
           })),
@@ -121,8 +131,12 @@ export function ImportClient({ projectId }: { projectId: string }) {
         const data = await res.json()
         setImportResult(data)
       } else {
-        const err = await res.json()
-        setImportError(err.error || 'Import failed')
+        const err = await res.json().catch(() => null)
+        const details: string[] = Array.isArray(err?.details) ? err.details : []
+        setImportError(
+          [err?.error || 'Import failed', ...details.slice(0, 10)].join('\n') +
+            (details.length > 10 ? `\n...and ${details.length - 10} more` : '')
+        )
       }
     } catch (err) {
       console.error('Import failed:', err)
@@ -257,7 +271,9 @@ export function ImportClient({ projectId }: { projectId: string }) {
             {/* Import error */}
             {importError && (
               <Alert variant="destructive" className="mb-6">
-                <AlertDescription>{importError}</AlertDescription>
+                <AlertDescription className="whitespace-pre-line">
+                  {importError}
+                </AlertDescription>
               </Alert>
             )}
 

@@ -2,7 +2,8 @@ import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { canAdminProject } from '@/lib/authorization'
 import { getReleaseItemScope } from '@/lib/team-batch-releases'
-import { FeedbackSource } from '@/generated/prisma/client'
+import { normalizeFeedbackSource } from '@/lib/csv-parser'
+import type { FeedbackSource } from '@/generated/prisma/client'
 import { NextRequest, NextResponse } from 'next/server'
 
 export async function GET(request: NextRequest) {
@@ -44,6 +45,9 @@ export async function GET(request: NextRequest) {
         where: {
           batchId,
           userId: session.user.id,
+          // Same visibility rule as the cross-batch path and the annotator
+          // project page: a hidden batch is not reachable by direct URL either.
+          batch: { isHidden: false },
           OR: [{ teamReleaseId: null }, { teamRelease: { isVisible: true } }],
         },
         select: {
@@ -194,6 +198,101 @@ export async function GET(request: NextRequest) {
   return NextResponse.json(feedbackItems)
 }
 
+interface ImportItemInput {
+  responseId?: string | null
+  cycleId?: string | null
+  studentId: string
+  activityId?: string | null
+  conjunctionId?: string | null
+  studentText: string
+  feedbackId: string
+  teacherId?: string | null
+  feedbackText: string
+  feedbackSource: FeedbackSource
+  optimal?: string | null
+  feedbackType?: string | null
+}
+
+const REQUIRED_TEXT_FIELDS = [
+  'studentId',
+  'studentText',
+  'feedbackId',
+  'feedbackText',
+] as const
+
+/**
+ * Server-side validation of the import payload. The client validates the CSV
+ * too, but this route is the last line before the blinded Feedback_Source is
+ * written, so it does not trust the caller: every item must carry a non-empty
+ * AI/HUMAN source (never defaulted) and the required text fields, and no
+ * Feedback_ID may repeat within the file (it is the project-wide unique key, so
+ * a repeat could only ever import once).
+ */
+function validateImportItems(
+  items: unknown[]
+): { items: ImportItemInput[]; errors: string[] } {
+  const errors: string[] = []
+  const valid: ImportItemInput[] = []
+  const rowsByFeedbackId = new Map<string, number[]>()
+
+  items.forEach((raw, index) => {
+    const row = index + 1
+    if (!raw || typeof raw !== 'object') {
+      errors.push(`Row ${row}: not an object`)
+      return
+    }
+    const item = raw as Record<string, unknown>
+    for (const field of REQUIRED_TEXT_FIELDS) {
+      const value = item[field]
+      if (typeof value !== 'string' || value.trim() === '') {
+        errors.push(`Row ${row}: missing ${field}`)
+        return
+      }
+    }
+    const feedbackSource = normalizeFeedbackSource(item.feedbackSource)
+    if (!feedbackSource) {
+      errors.push(
+        `Row ${row} (${String(item.feedbackId)}): feedbackSource must be "AI" or "HUMAN", got ${JSON.stringify(item.feedbackSource ?? '')}`
+      )
+      return
+    }
+    const feedbackId = (item.feedbackId as string).trim()
+    const list = rowsByFeedbackId.get(feedbackId) ?? []
+    list.push(row)
+    rowsByFeedbackId.set(feedbackId, list)
+
+    const optionalText = (key: string) =>
+      typeof item[key] === 'string' && (item[key] as string).trim() !== ''
+        ? (item[key] as string)
+        : null
+
+    valid.push({
+      responseId: optionalText('responseId'),
+      cycleId: optionalText('cycleId'),
+      studentId: item.studentId as string,
+      activityId: optionalText('activityId'),
+      conjunctionId: optionalText('conjunctionId'),
+      studentText: item.studentText as string,
+      feedbackId,
+      teacherId: optionalText('teacherId'),
+      feedbackText: item.feedbackText as string,
+      feedbackSource,
+      optimal: optionalText('optimal'),
+      feedbackType: optionalText('feedbackType'),
+    })
+  })
+
+  for (const [feedbackId, rows] of rowsByFeedbackId) {
+    if (rows.length > 1) {
+      errors.push(
+        `Feedback_ID "${feedbackId}" appears ${rows.length} times in this file (rows ${rows.join(', ')})`
+      )
+    }
+  }
+
+  return { items: valid, errors }
+}
+
 export async function POST(request: Request) {
   const session = await auth()
   if (!session?.user) {
@@ -210,9 +309,20 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
-  if (!projectId || !Array.isArray(items) || items.length === 0) {
+  if (!Array.isArray(items) || items.length === 0) {
     return NextResponse.json(
       { error: 'projectId and items array are required' },
+      { status: 400 }
+    )
+  }
+
+  const validated = validateImportItems(items)
+  if (validated.errors.length > 0) {
+    return NextResponse.json(
+      {
+        error: `Import rejected: ${validated.errors.length} validation ${validated.errors.length === 1 ? 'error' : 'errors'}. Nothing was imported.`,
+        details: validated.errors,
+      },
       { status: 400 }
     )
   }
@@ -227,78 +337,75 @@ export async function POST(request: Request) {
 
   // Identify which Feedback_IDs already exist in this project so we can
   // report a proper skip count AND attach an importId to only the NEW rows.
-  // createMany({skipDuplicates: true}) doesn't return ids, so we do the
-  // dedupe manually: pre-check existing, insert only new ones, tag with
-  // the Import id.
-  const incomingIds = (items as { feedbackId: string }[]).map(
-    (i) => i.feedbackId
-  )
+  // createMany doesn't return ids, so the dedupe is manual: pre-check existing,
+  // insert only new ones, tag with the Import id. In-file repeats were already
+  // rejected above, so every surviving row is a distinct Feedback_ID.
+  const incomingIds = validated.items.map((i) => i.feedbackId)
   const existing = await prisma.feedbackItem.findMany({
     where: { projectId, feedbackId: { in: incomingIds } },
     select: { feedbackId: true },
   })
   const existingIds = new Set(existing.map((e) => e.feedbackId))
-  const newItems = (items as {
-    responseId?: string
-    cycleId?: string
-    studentId: string
-    activityId?: string
-    conjunctionId?: string
-    studentText: string
-    feedbackId: string
-    teacherId?: string
-    feedbackText: string
-    feedbackSource: string
-    optimal?: string
-    feedbackType?: string
-  }[]).filter((i) => !existingIds.has(i.feedbackId))
+  const newItems = validated.items.filter((i) => !existingIds.has(i.feedbackId))
 
-  // Get the current max displayOrder so this import's items don't collide
-  // with pre-existing ones (rolling upload semantics).
-  const maxOrder = await prisma.feedbackItem.aggregate({
-    where: { projectId },
-    _max: { displayOrder: true },
+  // The Import row and its items commit together: an Import must never claim
+  // items that were not written (and a failed insert must not leave a
+  // provenance row behind). displayOrder continues from the current max so a
+  // rolling upload doesn't collide with earlier ones.
+  const importRow = await prisma.$transaction(async (tx) => {
+    const maxOrder = await tx.feedbackItem.aggregate({
+      where: { projectId },
+      _max: { displayOrder: true },
+    })
+    const startOrder = (maxOrder._max.displayOrder ?? -1) + 1
+
+    const created = await tx.import.create({
+      data: {
+        projectId,
+        filename: filename?.toString().slice(0, 255) || 'unnamed.csv',
+        itemCount: newItems.length,
+        skippedCount: validated.items.length - newItems.length,
+      },
+    })
+
+    if (newItems.length > 0) {
+      const result = await tx.feedbackItem.createMany({
+        data: newItems.map((item, index) => ({
+          projectId,
+          importId: created.id,
+          responseId: item.responseId,
+          cycleId: item.cycleId,
+          studentId: item.studentId,
+          activityId: item.activityId,
+          conjunctionId: item.conjunctionId,
+          studentText: item.studentText,
+          feedbackId: item.feedbackId,
+          teacherId: item.teacherId,
+          feedbackText: item.feedbackText,
+          feedbackSource: item.feedbackSource,
+          optimal: item.optimal,
+          feedbackType: item.feedbackType,
+          displayOrder: startOrder + index,
+        })),
+      })
+      if (result.count !== newItems.length) {
+        // Cannot happen without skipDuplicates (a collision throws instead),
+        // but the Import's itemCount must never overstate what was written.
+        throw new Error(
+          `Expected to import ${newItems.length} items but wrote ${result.count}`
+        )
+      }
+    }
+
+    return created
   })
-  const startOrder = (maxOrder._max.displayOrder ?? -1) + 1
-
-  // Create an Import row up front so we can tag the new items with its id.
-  const importRow = await prisma.import.create({
-    data: {
-      projectId,
-      filename: filename?.toString().slice(0, 255) || 'unnamed.csv',
-      itemCount: newItems.length,
-      skippedCount: items.length - newItems.length,
-    },
-  })
-
-  if (newItems.length > 0) {
-    const data = newItems.map((item, index) => ({
-      projectId,
-      importId: importRow.id,
-      responseId: item.responseId || null,
-      cycleId: item.cycleId || null,
-      studentId: item.studentId,
-      activityId: item.activityId || null,
-      conjunctionId: item.conjunctionId || null,
-      studentText: item.studentText,
-      feedbackId: item.feedbackId,
-      teacherId: item.teacherId || null,
-      feedbackText: item.feedbackText,
-      feedbackSource: item.feedbackSource.toUpperCase() as FeedbackSource,
-      optimal: item.optimal || null,
-      feedbackType: item.feedbackType || null,
-      displayOrder: startOrder + index,
-    }))
-
-    await prisma.feedbackItem.createMany({ data, skipDuplicates: true })
-  }
 
   return NextResponse.json(
     {
       importId: importRow.id,
       imported: newItems.length,
-      skipped: items.length - newItems.length,
-      total: items.length,
+      skipped: validated.items.length - newItems.length,
+      total: validated.items.length,
     },
     { status: 201 }
   )

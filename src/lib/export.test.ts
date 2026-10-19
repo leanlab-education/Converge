@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  AUTO_RECONCILED_NOTE,
   DISCREPANCY_COLUMNS,
   buildDiscrepancyFilename,
   buildDiscrepancyRows,
@@ -15,8 +16,10 @@ import {
   itemGrainCells,
   itemGrainHeader,
   parseExportKind,
+  sanitizeFilenamePart,
   scorerGrainCells,
   scorerGrainHeader,
+  scoringRoleLabel,
   toCsv,
   usesFinalScores,
   type DiscrepancyRawScore,
@@ -160,10 +163,34 @@ describe('formatScoringRole', () => {
   })
 })
 
+describe('scoringRoleLabel', () => {
+  it('labels a TRAINING pair A/B by team position even though both are stored PRIMARY', () => {
+    // syncBatchAssignmentsForRelease only assigns DOUBLE when isDoubleScored,
+    // so a training pair is PRIMARY/PRIMARY and used to export as two "Scorer A"s.
+    expect(scoringRoleLabel({ scoringRole: 'PRIMARY', isPaired: true, memberIndex: 0 })).toBe('Scorer A')
+    expect(scoringRoleLabel({ scoringRole: 'PRIMARY', isPaired: true, memberIndex: 1 })).toBe('Scorer B')
+  })
+
+  it('agrees with the stored role on a double-scored batch (no change to existing files)', () => {
+    expect(scoringRoleLabel({ scoringRole: 'PRIMARY', isPaired: true, memberIndex: 0 })).toBe(formatScoringRole('PRIMARY'))
+    expect(scoringRoleLabel({ scoringRole: 'DOUBLE', isPaired: true, memberIndex: 1 })).toBe(formatScoringRole('DOUBLE'))
+  })
+
+  it('keeps the stored-role mapping on an unpaired (independent) batch', () => {
+    expect(scoringRoleLabel({ scoringRole: 'PRIMARY', isPaired: false, memberIndex: 1 })).toBe('Scorer A')
+  })
+
+  it('falls back to the stored role when the scorer is not on the release team', () => {
+    expect(scoringRoleLabel({ scoringRole: 'DOUBLE', isPaired: true, memberIndex: null })).toBe('Scorer B')
+    expect(scoringRoleLabel({ scoringRole: 'PRIMARY', isPaired: true, memberIndex: -1 })).toBe('Scorer A')
+  })
+})
+
 describe('buildScorerGrainRows', () => {
+  // roleByBatchUser carries the display label (scoringRoleLabel), not the enum.
   const lookups = {
     teamByUserId: new Map([['u1', 'Team Alpha']]),
-    roleByBatchUser: new Map([['b1::u1', 'PRIMARY']]),
+    roleByBatchUser: new Map([['b1::u1', 'Scorer A']]),
   }
 
   function score(overrides: Partial<ScorerGrainInput> = {}): ScorerGrainInput {
@@ -350,7 +377,7 @@ describe('buildItemGrainRows', () => {
   }
 
   it('collapses scores from multiple teams and scorers into one row per item', () => {
-    const rows = buildItemGrainRows(
+    const { rows, conflicts } = buildItemGrainRows(
       [entry('i1', 'F001')],
       [
         { feedbackItemId: 'i1', dimensionKey: 'criterion_1', value: 1 },
@@ -364,17 +391,18 @@ describe('buildItemGrainRows', () => {
       criterion_2: 0,
       criterion_3: 1,
     })
+    expect(conflicts).toEqual([])
   })
 
   it('emits a row for a released but unscored item, with blank criteria', () => {
-    const rows = buildItemGrainRows([entry('i1', 'F001')], [])
+    const { rows } = buildItemGrainRows([entry('i1', 'F001')], [])
     expect(rows).toHaveLength(1)
     expect(itemGrainCells(rows[0], DIM_KEYS).slice(15)).toEqual(['', '', ''])
   })
 
   it('ignores scores for items outside the requested scope', () => {
     // A stray score must not resurrect an item the scope filter excluded.
-    const rows = buildItemGrainRows(
+    const { rows } = buildItemGrainRows(
       [entry('i1', 'F001')],
       [{ feedbackItemId: 'i-other', dimensionKey: 'criterion_1', value: 1 }]
     )
@@ -382,16 +410,64 @@ describe('buildItemGrainRows', () => {
     expect(rows[0].dimensionScores).toEqual({})
   })
 
-  it('preserves item order from the query', () => {
-    const rows = buildItemGrainRows(
-      [entry('i1', 'F001'), entry('i2', 'F002'), entry('i3', 'F003')],
+  it('orders rows by numeric Feedback_ID, not lexically (F2 before F10)', () => {
+    // The query used to orderBy feedbackId asc, which put F10 before F2.
+    const { rows } = buildItemGrainRows(
+      [entry('i10', 'F10'), entry('i2', 'F2'), entry('i1', 'F1'), entry('i100', 'F100')],
       []
     )
-    expect(rows.map((r) => r.feedbackId)).toEqual(['F001', 'F002', 'F003'])
+    expect(rows.map((r) => r.feedbackId)).toEqual(['F1', 'F2', 'F10', 'F100'])
+  })
+
+  // Before: the last score the database happened to return silently won, so
+  // a stray raw score on an independent batch made the final nondeterministic.
+  it('blanks a cell and reports a conflict when two distinct finals exist for it', () => {
+    const { rows, conflicts } = buildItemGrainRows(
+      [entry('i1', 'F001')],
+      [
+        { feedbackItemId: 'i1', dimensionKey: 'criterion_1', value: 1 },
+        { feedbackItemId: 'i1', dimensionKey: 'criterion_1', value: 0 },
+        { feedbackItemId: 'i1', dimensionKey: 'criterion_2', value: 1 },
+      ]
+    )
+    expect(rows[0].dimensionScores).toEqual({ criterion_2: 1 })
+    expect(itemGrainCells(rows[0], DIM_KEYS).slice(15)).toEqual(['', '1', ''])
+    expect(conflicts).toEqual([
+      { feedbackItemId: 'i1', feedbackId: 'F001', dimensionKey: 'criterion_1', values: [1, 0] },
+    ])
+  })
+
+  it('collapses redundant candidates that agree without reporting a conflict', () => {
+    // Two rows, one value: the cell is unambiguous even if the rows are redundant.
+    const { rows, conflicts } = buildItemGrainRows(
+      [entry('i1', 'F001')],
+      [
+        { feedbackItemId: 'i1', dimensionKey: 'criterion_1', value: 1 },
+        { feedbackItemId: 'i1', dimensionKey: 'criterion_1', value: 1 },
+      ]
+    )
+    expect(rows[0].dimensionScores).toEqual({ criterion_1: 1 })
+    expect(conflicts).toEqual([])
+  })
+
+  it('is deterministic: the same inputs in a different order give the same file', () => {
+    const scores = [
+      { feedbackItemId: 'i1', dimensionKey: 'criterion_1', value: 1 },
+      { feedbackItemId: 'i1', dimensionKey: 'criterion_1', value: 0 },
+      { feedbackItemId: 'i2', dimensionKey: 'criterion_2', value: 1 },
+    ]
+    const items = [entry('i2', 'F2'), entry('i1', 'F1')]
+    const a = buildItemGrainRows(items, scores)
+    const b = buildItemGrainRows([...items].reverse(), [...scores].reverse())
+    expect(a.rows.map((r) => itemGrainCells(r, DIM_KEYS))).toEqual(
+      b.rows.map((r) => itemGrainCells(r, DIM_KEYS))
+    )
+    expect(a.conflicts).toHaveLength(1)
+    expect(b.conflicts).toHaveLength(1)
   })
 
   it('renders a full row in template order', () => {
-    const rows = buildItemGrainRows(
+    const { rows } = buildItemGrainRows(
       [entry('i1', 'F2475')],
       [
         { feedbackItemId: 'i1', dimensionKey: 'criterion_1', value: 1 },
@@ -428,7 +504,7 @@ describe('hasFullScoreSet', () => {
       { feedbackItemId: 'i1', dimensionKey: 'criterion_1', value: 1 },
       { feedbackItemId: 'i1', dimensionKey: 'criterion_2', value: 0 },
     ]
-  )[0]
+  ).rows[0]
 
   it('is false while any criterion is missing a final value', () => {
     expect(hasFullScoreSet(row, DIM_KEYS)).toBe(false)
@@ -448,7 +524,7 @@ describe('hasFullScoreSet', () => {
         dimensionKey: key,
         value: 0,
       }))
-    )[0]
+    ).rows[0]
     expect(hasFullScoreSet(zeroed, DIM_KEYS)).toBe(true)
   })
 })
@@ -496,6 +572,25 @@ describe('buildExportFilename', () => {
     ).toBe(
       'scores-reconciled-by-feedback-activity-9-conj-Because-complete-items-finalized-batches-2026-07-28.csv'
     )
+  })
+
+  it('sanitizes the activity/conjunction filters the same way batch names are', () => {
+    // These come straight from the query string and end up in Content-Disposition.
+    expect(
+      buildExportFilename(
+        'raw-by-scorer',
+        { activityId: 'Act 9"/B', conjunctionId: 'But/Because' },
+        '2026-07-28'
+      )
+    ).toBe('scores-original-activity-Act-9--B-conj-But-Because-2026-07-28.csv')
+  })
+})
+
+describe('sanitizeFilenamePart', () => {
+  it('replaces every character outside [A-Za-z0-9_-] with a dash', () => {
+    expect(sanitizeFilenamePart('Batch 45')).toBe('Batch-45')
+    expect(sanitizeFilenamePart('a/b"c d_e-f')).toBe('a-b-c-d_e-f')
+    expect(sanitizeFilenamePart('ok_name-1')).toBe('ok_name-1')
   })
 })
 
@@ -701,6 +796,77 @@ describe('discrepancy report', () => {
     expect(rows[0].teamName).toBe('Team 2')
     expect(rows[0].difference).toBe(2)
     expect(rows[0].resolution).toBe('Unresolved')
+  })
+
+  it('prefers the rationale on the same criterion’s final over another criterion’s', () => {
+    const rows = buildDiscrepancyRows(
+      [
+        raw({ userId: 'u-abi', value: 1 }),
+        raw({ userId: 'u-luofan', value: 2 }),
+        raw({ userId: 'u-abi', value: 1, dimensionKey: 'criterion_2', dimensionSortOrder: 2 }),
+        raw({ userId: 'u-luofan', value: 2, dimensionKey: 'criterion_2', dimensionSortOrder: 2 }),
+      ],
+      [
+        { feedbackItemId: 'i1', ownerUserId: 'u-abi', dimensionKey: 'criterion_1', value: 2, notes: 'Agreed on c1', recordedByEmail: null },
+        { feedbackItemId: 'i1', ownerUserId: 'u-abi', dimensionKey: 'criterion_2', value: 1, notes: 'Agreed on c2', recordedByEmail: null },
+      ],
+      [],
+      { teamByUserId: TEAMS }
+    )
+    expect(rows.map((r) => [r.dimensionKey, r.reconciliationNotes])).toEqual([
+      ['criterion_1', 'Agreed on c1'],
+      ['criterion_2', 'Agreed on c2'],
+    ])
+  })
+
+  it('never prints the auto-reconcile marker as a rationale when falling back', () => {
+    // criterion_1 agreed (auto-reconciled); criterion_2 disagreed and has a
+    // final with no note. The fallback must skip the marker and find the real
+    // rationale on criterion_3, not report "Auto-reconciled (scores matched)".
+    const rows = buildDiscrepancyRows(
+      [
+        raw({ userId: 'u-abi', value: 1, dimensionKey: 'criterion_2', dimensionSortOrder: 2 }),
+        raw({ userId: 'u-luofan', value: 2, dimensionKey: 'criterion_2', dimensionSortOrder: 2 }),
+      ],
+      [
+        { feedbackItemId: 'i1', ownerUserId: 'u-abi', dimensionKey: 'criterion_1', value: 2, notes: AUTO_RECONCILED_NOTE, recordedByEmail: null },
+        { feedbackItemId: 'i1', ownerUserId: 'u-abi', dimensionKey: 'criterion_2', value: 2, notes: null, recordedByEmail: 'abi@test.com' },
+        { feedbackItemId: 'i1', ownerUserId: 'u-abi', dimensionKey: 'criterion_3', value: 1, notes: 'Discussed as an item', recordedByEmail: null },
+      ],
+      [],
+      { teamByUserId: TEAMS }
+    )
+    expect(rows).toHaveLength(1)
+    expect(rows[0].reconciliationNotes).toBe('Discussed as an item')
+
+    const onlyMarker = buildDiscrepancyRows(
+      [
+        raw({ userId: 'u-abi', value: 1, dimensionKey: 'criterion_2', dimensionSortOrder: 2 }),
+        raw({ userId: 'u-luofan', value: 2, dimensionKey: 'criterion_2', dimensionSortOrder: 2 }),
+      ],
+      [
+        { feedbackItemId: 'i1', ownerUserId: 'u-abi', dimensionKey: 'criterion_1', value: 2, notes: AUTO_RECONCILED_NOTE, recordedByEmail: null },
+        { feedbackItemId: 'i1', ownerUserId: 'u-abi', dimensionKey: 'criterion_2', value: 2, notes: null, recordedByEmail: null },
+      ],
+      [],
+      { teamByUserId: TEAMS }
+    )
+    expect(onlyMarker[0].reconciliationNotes).toBe('')
+  })
+
+  it('orders items numerically by Feedback_ID within a batch (F2 before F10)', () => {
+    const rows = buildDiscrepancyRows(
+      [
+        raw({ userId: 'u-abi', value: 1, feedbackItemId: 'i10', item: item({ feedbackId: 'F10' }) }),
+        raw({ userId: 'u-luofan', value: 2, feedbackItemId: 'i10', item: item({ feedbackId: 'F10' }) }),
+        raw({ userId: 'u-abi', value: 1, feedbackItemId: 'i2', item: item({ feedbackId: 'F2' }) }),
+        raw({ userId: 'u-luofan', value: 2, feedbackItemId: 'i2', item: item({ feedbackId: 'F2' }) }),
+      ],
+      [],
+      [],
+      { teamByUserId: TEAMS }
+    )
+    expect(rows.map((r) => r.feedbackId)).toEqual(['F2', 'F10'])
   })
 
   it('orders rows by batch, then item, then rubric order', () => {

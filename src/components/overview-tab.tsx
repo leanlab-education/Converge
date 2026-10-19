@@ -175,6 +175,9 @@ export function OverviewTab({
   usePseudonyms,
   onTogglePseudonyms,
 }: OverviewTabProps) {
+  // scoredItemCount = items where every owed criterion has a score from an
+  // expected scorer (loadAdminProjectStats). A half-scored item is not scored
+  // here, matching the Annotators tab's Completed figures.
   const totalItems = project._count.feedbackItems
   const completionPct = totalItems > 0 ? Math.round((scoredItemCount / totalItems) * 100) : 0
   const activeBatchCount = batches.filter(b => b.status === 'SCORING' || b.status === 'RECONCILING').length
@@ -231,8 +234,8 @@ export function OverviewTab({
       {/* Stat cards */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <ColoredStatCard label="Total Items"    value={totalItems.toLocaleString()} icon={FileText}     accent="primary" />
-        <ColoredStatCard label="Scored"         value={scoredItemCount.toLocaleString()} sub={`of ${totalItems.toLocaleString()}`} icon={CheckCircle2} accent="success" />
-        <ColoredStatCard label="Completion"     value={`${completionPct}%`}             icon={BarChart3}   accent="reconciling" />
+        <ColoredStatCard label="Scored"         value={scoredItemCount.toLocaleString()} sub={`of ${totalItems.toLocaleString()} · every criterion scored`} icon={CheckCircle2} accent="success" />
+        <ColoredStatCard label="Completion"     value={`${completionPct}%`}             sub="fully scored items" icon={BarChart3}   accent="reconciling" />
         <ColoredStatCard label="Active Batches" value={activeBatchCount}                sub="scoring or reconciling" icon={Layers} accent="setup" />
       </div>
 

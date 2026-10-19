@@ -1,7 +1,7 @@
 import { auth } from '@/lib/auth'
 import { canAdminProject } from '@/lib/authorization'
 import { prisma } from '@/lib/db'
-import { countForAssignment, loadSlotMaps } from '@/lib/evaluator-stats'
+import { loadAdminProjectStats } from '@/lib/evaluator-stats'
 import { NextRequest, NextResponse } from 'next/server'
 
 export async function GET(
@@ -38,57 +38,10 @@ export async function GET(
     teamMemberships.map((m) => [m.userId, m.team])
   )
 
-  // All batch assignments for this project
-  const batchAssignments = await prisma.batchAssignment.findMany({
-    where: { batch: { projectId } },
-    include: {
-      teamRelease: {
-        include: {
-          team: {
-            include: {
-              members: {
-                select: { userId: true },
-                orderBy: { user: { email: 'asc' } },
-              },
-              dimensions: {
-                select: { dimensionId: true },
-              },
-            },
-          },
-        },
-      },
-      batch: {
-        select: { id: true, projectId: true, isDoubleScored: true, type: true },
-      },
-    },
-  })
-
-  // Group batch assignments by userId
-  const basByUser = new Map<string, typeof batchAssignments>()
-  for (const ba of batchAssignments) {
-    const list = basByUser.get(ba.userId) ?? []
-    list.push(ba)
-    basByUser.set(ba.userId, list)
-  }
-
-  // Assigned = this user's slot-adjusted share of each batch; completed = the
-  // items in that share they have scored on every criterion they owe (a
-  // half-scored item does not count).
-  const { itemCountByBatchSlot, scoredCountByUser } = await loadSlotMaps(batchAssignments)
-
-  const assignedByUser = new Map<string, number>()
-  const completedByUser = new Map<string, number>()
-  for (const [userId, bas] of basByUser) {
-    const scoredMap = scoredCountByUser.get(userId) ?? new Map()
-    let assigned = 0
-    let completed = 0
-    for (const ba of bas) {
-      assigned += countForAssignment(ba, userId, itemCountByBatchSlot)
-      completed += countForAssignment(ba, userId, scoredMap)
-    }
-    assignedByUser.set(userId, assigned)
-    completedByUser.set(userId, completed)
-  }
+  // Assigned = this user's slot-adjusted share of each batch they can see;
+  // completed = the items in that share they have scored on every criterion
+  // they owe. Same loader as the project page, so the two never disagree.
+  const { progressByUser } = await loadAdminProjectStats(projectId)
 
   const latestScores = await prisma.score.findMany({
     where: { feedbackItem: { batch: { projectId } } },
@@ -98,15 +51,18 @@ export async function GET(
   })
   const lastScoredByUser = new Map(latestScores.map((s) => [s.userId, s.scoredAt.toISOString()]))
 
-  const result = evaluators.map((ev) => ({
-    id: ev.id,
-    user: ev.user,
-    role: ev.role,
-    assignedCount: assignedByUser.get(ev.user.id) ?? 0,
-    completedCount: completedByUser.get(ev.user.id) ?? 0,
-    lastScoredAt: lastScoredByUser.get(ev.user.id) ?? null,
-    team: teamByUser.get(ev.user.id) ?? null,
-  }))
+  const result = evaluators.map((ev) => {
+    const progress = progressByUser.get(ev.user.id)
+    return {
+      id: ev.id,
+      user: ev.user,
+      role: ev.role,
+      assignedCount: progress?.assignedCount ?? 0,
+      completedCount: progress?.completedCount ?? 0,
+      lastScoredAt: lastScoredByUser.get(ev.user.id) ?? null,
+      team: teamByUser.get(ev.user.id) ?? null,
+    }
+  })
 
   return NextResponse.json(result)
 }
