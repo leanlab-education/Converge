@@ -74,6 +74,12 @@ export async function POST(
           },
         },
       },
+      // This annotator's persisted slot, so getReleaseItemScope does not have
+      // to re-derive it from email order.
+      assignments: {
+        where: { userId: session.user.id },
+        select: { userId: true, slotIndex: true },
+      },
     },
   })
   if (!release) {

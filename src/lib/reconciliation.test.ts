@@ -30,7 +30,7 @@ describe('computeReleaseDiscrepancyStats', () => {
     setScores([{ feedbackItemId: 'i1', dimensionId: 'd1' }]) // i1 resolved, i3 open
     const stats = await computeReleaseDiscrepancyStats({
       batchId: 'b', batchType: 'REGULAR', projectId: 'p',
-      memberUserIds: ['u0', 'u1'], teamDimensionIds: ['d1'],
+      memberUserIds: ['u0', 'u1'], ownerUserId: 'u0', teamDimensionIds: ['d1'],
     })
     expect(stats).toEqual({ discrepancyCount: 2, reconciledCount: 1 })
   })
@@ -46,7 +46,7 @@ describe('computeReleaseDiscrepancyStats', () => {
     )
     const stats = await computeReleaseDiscrepancyStats({
       batchId: 'b', batchType: 'REGULAR', projectId: 'p',
-      memberUserIds: ['u0', 'u1'], teamDimensionIds: ['d1'],
+      memberUserIds: ['u0', 'u1'], ownerUserId: 'u0', teamDimensionIds: ['d1'],
     })
     expect(stats.discrepancyCount).toBe(0)
   })
@@ -59,8 +59,31 @@ describe('computeReleaseDiscrepancyStats', () => {
     )
     const stats = await computeReleaseDiscrepancyStats({
       batchId: 'b', batchType: 'REGULAR', projectId: 'p',
-      memberUserIds: ['u0', 'u1'], teamDimensionIds: ['d1'],
+      memberUserIds: ['u0', 'u1'], ownerUserId: 'u0', teamDimensionIds: ['d1'],
     })
     expect(stats).toEqual({ discrepancyCount: 0, reconciledCount: 0 })
+  })
+
+  it('looks finals up under the given owner, not under memberUserIds[0]', async () => {
+    setScores([{ feedbackItemId: 'i1', dimensionId: 'd1' }])
+    const stats = await computeReleaseDiscrepancyStats({
+      batchId: 'b', batchType: 'REGULAR', projectId: 'p',
+      memberUserIds: ['u0', 'u1'], ownerUserId: 'u1', teamDimensionIds: ['d1'],
+    })
+    expect(stats).toEqual({ discrepancyCount: 2, reconciledCount: 1 })
+    expect(prismaMock.score.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ userId: 'u1', isReconciled: true }),
+      })
+    )
+  })
+
+  it('reports nothing reconciled when the release has no owner', async () => {
+    setScores([{ feedbackItemId: 'i1', dimensionId: 'd1' }])
+    const stats = await computeReleaseDiscrepancyStats({
+      batchId: 'b', batchType: 'REGULAR', projectId: 'p',
+      memberUserIds: ['u0', 'u1'], ownerUserId: null, teamDimensionIds: ['d1'],
+    })
+    expect(stats).toEqual({ discrepancyCount: 2, reconciledCount: 0 })
   })
 })

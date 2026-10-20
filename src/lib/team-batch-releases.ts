@@ -1,8 +1,25 @@
 import { prisma } from '@/lib/db'
+import {
+  planReleaseOwnership,
+  resolveReleaseOwnerUserId,
+  resolveUserSlotIndex,
+} from '@/lib/release-ownership'
 
 interface ReleaseWithContext {
   id: string
   scorerUserId: string | null
+  /**
+   * Persisted release owner (TeamBatchRelease.ownerUserId). Optional so callers
+   * that build the shape by hand keep working; when absent or null the legacy
+   * email-asc rule (team.members[0]) applies. Prisma `include` queries return
+   * the scalar automatically.
+   */
+  ownerUserId?: string | null
+  /**
+   * Persisted slots (BatchAssignment.slotIndex), usually just the row of the
+   * user being asked about. Same fallback as ownerUserId.
+   */
+  assignments?: { userId: string; slotIndex: number | null }[]
   batch?: {
     id: string
     isDoubleScored: boolean
@@ -67,8 +84,8 @@ export function getReleaseItemScope(
     return userId === release.scorerUserId ? { mode: 'all' } : { mode: 'none' }
   }
   if (isSlotSplitRelease(release)) {
-    const idx = release.team.members.findIndex((m) => m.userId === userId)
-    return idx === -1 ? { mode: 'none' } : { mode: 'slot', slotIndex: idx }
+    const slotIndex = getReleaseUserSlotIndex(release, userId)
+    return slotIndex === null ? { mode: 'none' } : { mode: 'slot', slotIndex }
   }
   return isMember ? { mode: 'all' } : { mode: 'none' }
 }
@@ -115,8 +132,14 @@ export function getExpectedReleaseDimensionIds(
   return release.team.dimensions?.map((dimension) => dimension.dimensionId) ?? []
 }
 
+/**
+ * The team member whose userId the release's reconciled/adjudicated finals are
+ * stored under. Persisted on the release by syncBatchAssignmentsForRelease;
+ * the email-asc rule (members[0]) is only the fallback for rows written before
+ * the column existed (see src/lib/release-ownership.ts).
+ */
 export function getReleaseOwnerUserId(release: ReleaseWithContext): string | null {
-  return release.team.members[0]?.userId ?? null
+  return resolveReleaseOwnerUserId(release.ownerUserId, release.team.members)
 }
 
 /**
@@ -136,17 +159,17 @@ export function isSlotSplitRelease(release: ReleaseWithContext): boolean {
 }
 
 /**
- * Returns 0/1 for the given user on a slot-split release (based on the team's
- * email-asc ordering). Returns null if the user isn't a team member or the
- * release doesn't split.
+ * Returns 0/1 for the given user on a slot-split release: the slot persisted on
+ * their BatchAssignment when the caller supplied `release.assignments`, else the
+ * legacy email-asc index. Returns null if the release doesn't split or the user
+ * is neither assigned nor a team member.
  */
 export function getReleaseUserSlotIndex(
   release: ReleaseWithContext,
   userId: string
 ): number | null {
   if (!isSlotSplitRelease(release)) return null
-  const idx = release.team.members.findIndex((m) => m.userId === userId)
-  return idx === -1 ? null : idx
+  return resolveUserSlotIndex(release.assignments, release.team.members, userId)
 }
 
 export async function syncBatchStatus(batchId: string) {
@@ -308,6 +331,9 @@ export async function syncBatchAssignmentsForRelease(releaseId: string) {
           },
         },
       },
+      // Existing rows carry the persisted slots; the re-sync below must keep
+      // them rather than re-derive from today's email order.
+      assignments: { select: { userId: true, slotIndex: true } },
     },
   })
 
@@ -317,10 +343,45 @@ export async function syncBatchAssignmentsForRelease(releaseId: string) {
 
   const userIds = getExpectedReleaseUserIds(release)
 
+  // Ownership is written once and then kept. The owner only ever moves when
+  // the persisted owner has left the team AND no finals are stored under them
+  // on this batch (team edits are blocked once scoring starts, so this is the
+  // pre-scoring member-swap case); an owner who still holds finals is kept even
+  // as a non-member so those finals stay reachable. See release-ownership.ts.
+  const persistedOwner = release.ownerUserId ?? null
+  const ownerIsMember =
+    persistedOwner !== null &&
+    release.team.members.some((m) => m.userId === persistedOwner)
+  const ownerHasFinals =
+    persistedOwner !== null && !ownerIsMember
+      ? (await prisma.score.count({
+          where: {
+            feedbackItem: { batchId: release.batch.id },
+            userId: persistedOwner,
+            isReconciled: true,
+          },
+        })) > 0
+      : false
+  const plan = planReleaseOwnership({
+    persistedOwnerUserId: persistedOwner,
+    keepOwnerIfNotMember: ownerHasFinals,
+    membersEmailAsc: release.team.members,
+    expectedUserIds: userIds,
+    isSlotSplit: isSlotSplitRelease(release),
+    existingAssignments: release.assignments ?? [],
+  })
+
   await prisma.$transaction(async (tx) => {
     await tx.batchAssignment.deleteMany({
       where: { teamReleaseId: releaseId },
     })
+
+    if (plan.ownerUserId !== persistedOwner) {
+      await tx.teamBatchRelease.update({
+        where: { id: releaseId },
+        data: { ownerUserId: plan.ownerUserId },
+      })
+    }
 
     if (userIds.length === 0) {
       return
@@ -336,6 +397,9 @@ export async function syncBatchAssignmentsForRelease(releaseId: string) {
         // so both are PRIMARY for their own slot.
         scoringRole:
           release.batch.isDoubleScored && index > 0 ? 'DOUBLE' : 'PRIMARY',
+        // Null unless the release splits; kept from the previous row when one
+        // existed, so a re-sync never swaps the pair's halves.
+        slotIndex: plan.slotIndexByUserId.get(userId) ?? null,
       })),
       skipDuplicates: true,
     })

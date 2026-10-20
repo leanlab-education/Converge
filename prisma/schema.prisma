@@ -27,6 +27,7 @@ model User {
   teamMemberships       EvaluatorTeamMember[]
   adjudicatedReleases   TeamBatchRelease[] @relation("TeamReleaseAdjudicator")
   teamBatchReleases     TeamBatchRelease[] @relation("TeamBatchReleaseScorer")
+  ownedReleases         TeamBatchRelease[] @relation("TeamBatchReleaseOwner")
   escalationsCreated    Escalation[]   @relation("EscalationEscalatedBy")
   escalationsResolved   Escalation[]   @relation("EscalationResolvedBy")
   criterionUnlocksOpened ReleaseCriterionUnlock[] @relation("CriterionUnlockOpenedBy")
@@ -247,6 +248,14 @@ model BatchAssignment {
   userId      String
   teamReleaseId String?
   scoringRole ScoringRole @default(PRIMARY)
+  // Which half of a slot-split (non-double-scored REGULAR) release this
+  // annotator scores: items with FeedbackItem.slotIndex == this value. Written
+  // once by syncBatchAssignmentsForRelease and never re-derived afterwards, so
+  // a later change to a user's email cannot swap the pair's halves. Null on
+  // releases that do not split (training, double-scored, single scorer) and on
+  // rows created before this column existed (readers fall back to the legacy
+  // email-ascending rule until scripts/backfill-release-ownership.ts runs).
+  slotIndex   Int?
   createdAt   DateTime    @default(now())
 
   batch       Batch             @relation(fields: [batchId], references: [id], onDelete: Cascade)
@@ -279,6 +288,16 @@ model TeamBatchRelease {
   teamId        String
   scorerUserId  String?
   adjudicatorId String?                       // Third-person tiebreaker for this team's escalated discrepancies — per team/criterion pairing, per batch (Amber 2026-06-18)
+  // The "release owner": the team member whose userId every reconciled /
+  // adjudicated final (Score.isReconciled = true) for this release is stored
+  // under. Historically re-derived on every read as the member with the lowest
+  // email, which meant a manual email change crossing the partner's email would
+  // hide every existing final. Written once by syncBatchAssignmentsForRelease
+  // (same email-ascending rule, so existing data is reproduced exactly) and kept
+  // as long as the owner is still on the team or has finals on this batch. Null
+  // only on rows created before this column existed; readers fall back to the
+  // legacy rule until scripts/backfill-release-ownership.ts runs.
+  ownerUserId   String?
   isVisible     Boolean  @default(false)
   status        BatchStatus @default(DRAFT)
   createdAt     DateTime @default(now())
@@ -287,6 +306,7 @@ model TeamBatchRelease {
   batch       Batch             @relation(fields: [batchId], references: [id], onDelete: Cascade)
   team        EvaluatorTeam     @relation(fields: [teamId], references: [id], onDelete: Cascade)
   scorerUser  User?             @relation("TeamBatchReleaseScorer", fields: [scorerUserId], references: [id], onDelete: SetNull)
+  owner       User?             @relation("TeamBatchReleaseOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
   adjudicator User?             @relation("TeamReleaseAdjudicator", fields: [adjudicatorId], references: [id], onDelete: SetNull)
   assignments BatchAssignment[]
   escalations Escalation[]

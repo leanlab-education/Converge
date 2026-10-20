@@ -4,7 +4,7 @@ import { redirect } from 'next/navigation'
 import { EvaluatorProjectPage } from './evaluator-project-page'
 import { countForAssignment, loadSlotMaps } from '@/lib/evaluator-stats'
 import { computeReleaseDiscrepancyStats } from '@/lib/reconciliation'
-import { releaseNeedsReconciliation } from '@/lib/team-batch-releases'
+import { getReleaseOwnerUserId, releaseNeedsReconciliation } from '@/lib/team-batch-releases'
 import { unlockVisibleToUserWhere } from '@/lib/criterion-unlocks'
 import { displayAnnotatorName } from '@/lib/generate-name'
 
@@ -146,6 +146,7 @@ export default async function ProjectPage({
           batchType: ba.batch.type,
           projectId,
           memberUserIds: release.team.members.map((m) => m.userId),
+          ownerUserId: getReleaseOwnerUserId(release),
           teamDimensionIds: release.team.dimensions.map((d) => d.dimensionId),
         })
         // A completed release with no discrepancies had nothing to reconcile —

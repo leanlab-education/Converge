@@ -48,6 +48,7 @@ export async function GET(request: NextRequest) {
         },
         select: {
           id: true,
+          slotIndex: true,
           teamRelease: {
             select: {
               id: true,
@@ -79,6 +80,8 @@ export async function GET(request: NextRequest) {
             isDoubleScored: release.batch.isDoubleScored,
             batchType: release.batch.type,
             team: { members: release.team.members },
+            // Persisted slot on this user's own assignment row.
+            assignments: [{ userId: session.user.id, slotIndex: assignment.slotIndex }],
           },
           session.user.id
         )
@@ -101,6 +104,7 @@ export async function GET(request: NextRequest) {
           OR: [{ teamReleaseId: null }, { teamRelease: { isVisible: true } }],
         },
         select: {
+          slotIndex: true,
           batch: { select: { id: true, type: true, isDoubleScored: true } },
           teamRelease: {
             select: {
@@ -126,6 +130,7 @@ export async function GET(request: NextRequest) {
             isDoubleScored: a.batch.isDoubleScored,
             batchType: a.batch.type,
             team: { members: a.teamRelease.team.members },
+            assignments: [{ userId: session.user.id, slotIndex: a.slotIndex }],
           },
           session.user.id
         )

@@ -101,6 +101,12 @@ For every team release in a batch:
 
 `TeamBatchRelease.scorerUserId` is legacy. New non-double-scored regular batches leave it null and rely on the slot split. The field is preserved on existing rows but unused by the UI.
 
+**Release owner and slots are persisted (2026-10-19).** `TeamBatchRelease.ownerUserId` is the team member every reconciled/adjudicated final (`Score.isReconciled = true`) for that release is stored under; `BatchAssignment.slotIndex` is the half of a slot-split release that annotator scores (matched against `FeedbackItem.slotIndex`). Until 2026-10 both were re-derived on every read from the team's members ordered by email ascending (`members[0]` = owner, member index = slot), so a DB-side email edit that crossed the partner's email would have hidden every final of the pair and swapped their halves (audit 2026-10-19, follow-up 1).
+- Both values are written by `syncBatchAssignmentsForRelease` and then kept. The first write uses the old email-asc rule, so existing data is reproduced exactly. A re-sync keeps persisted slots; a member swapped in before scoring takes the departed member's slot; the owner only moves when they have left the team **and** hold no finals on that batch. The rules are pure functions in `src/lib/release-ownership.ts`.
+- **Readers must go through `getReleaseOwnerUserId`, `getReleaseUserSlotIndex` or `getReleaseItemScope`** in `src/lib/team-batch-releases.ts` and pass the release's `ownerUserId` / the user's `assignments` row when they have them (Prisma `include` returns the scalars automatically). These fall back to the email rule only while a value is null. Never inline `team.members[0]` or `members.findIndex(...)`.
+- **Deploy order:** `npx prisma db push` (adds the two nullable columns), then `doppler run -p writing-evaluator -c dev -- npx tsx scripts/backfill-release-ownership.ts --write --allow-prod`, then the same script with `--verify`, which must report 0 mismatches and 0 unpersisted rows. The backfill is fill-nulls-only and idempotent.
+- **Changing a user's email (DB-side; there is no API for it):** only after `--verify` passes with nothing unpersisted. Before the backfill, a rename that crosses the partner's email breaks the pair's finals and halves; after it, the rename is harmless and `--verify` will report the resulting mismatches against the legacy rule, which is expected. Change the email in StudyFlow at the same time (see memory: duplicate-account note).
+
 ### Batch lock & editable reconciliation (shipped 2026-06-30)
 
 `COMPLETE` and "frozen" are **separate** concepts:
