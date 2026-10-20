@@ -50,28 +50,29 @@ Schema: `prisma/schema.prisma`. All IDs are `cuid()`. All models cascade-delete 
   3. **Single-scored REGULAR** (`isDoubleScored=false`) — either a 50/50 `slotIndex` split between two members, **or** one named scorer who sees all items; no reconciliation.
 
 ### 1.8 BatchAssignment
-- **`BatchAssignment`** (`schema.prisma:233`): `[batchId, userId]` (unique), optional `teamReleaseId`, `scoringRole` (`ScoringRole`: `PRIMARY | DOUBLE`, default `PRIMARY`). One row per annotator who scores anything in the batch.
+- **`BatchAssignment`** (`schema.prisma:233`): `[batchId, userId]` (unique), optional `teamReleaseId`, `scoringRole` (`ScoringRole`: `PRIMARY | DOUBLE`, default `PRIMARY`), `slotIndex?` (0/1 on a slot-split release — the half of `FeedbackItem.slotIndex` this annotator scores; null on releases that do not split and on rows written before 2026-10, which fall back to the email-asc rule until backfilled). One row per annotator who scores anything in the batch.
 - **`ScoringRole`** (`schema.prisma:248`): only double-scored batches use the `PRIMARY`/`DOUBLE` distinction; for single-scored split, both members are `PRIMARY` for their own slot (`team-batch-releases.ts:300`).
 
 ### 1.9 BatchRange
 - **`BatchRange`** (`schema.prisma:253`): `startFeedbackId`, `endFeedbackId`, `itemCount`, `sortOrder`. Records the feedback-ID ranges a batch was built from.
 
 ### 1.10 TeamBatchRelease (the central per-team unit of work)
-- **`TeamBatchRelease`** (`schema.prisma:265`): `[batchId, teamId]` (unique), `scorerUserId?` (legacy named single-scorer), `adjudicatorId?` (per-team/criterion tiebreaker for this batch), `isVisible` (default false), `status` (`BatchStatus`, default `DRAFT`).
+- **`TeamBatchRelease`** (`schema.prisma:265`): `[batchId, teamId]` (unique), `scorerUserId?` (legacy named single-scorer), `ownerUserId?` (the **release owner**, see below), `adjudicatorId?` (per-team/criterion tiebreaker for this batch), `isVisible` (default false), `status` (`BatchStatus`, default `DRAFT`).
 - One release per (team × batch). A batch's status is the rollup of its releases. Visibility (`isVisible`) is decoupled from assignment — releases are created hidden, then published.
 - `scorerUserId` is **legacy**; new single-scored regular batches leave it null and rely on the slot split (`schema.prisma:269`, `batches/route.ts:644`).
+- **Release owner (`ownerUserId`)**: the team member whose `userId` every reconciled/adjudicated `Score` for this release is stored under (§1.12). Persisted by `syncBatchAssignmentsForRelease` the first time the release's assignments are written — using the legacy email-asc rule (`members[0]`), so existing data is reproduced exactly — and then **kept**: a re-sync never re-derives it, and it moves only when the owner has left the team *and* holds no finals on the batch (pre-scoring member swap). The same sync persists each member's `BatchAssignment.slotIndex`. Readers use `getReleaseOwnerUserId` / `getReleaseUserSlotIndex` / `getReleaseItemScope` (`team-batch-releases.ts`), which prefer the persisted value and fall back to the email rule only while it is null; rules in `release-ownership.ts`. Rows from before 2026-10 are filled by `scripts/backfill-release-ownership.ts` (fill-nulls-only, idempotent, `--verify` acceptance check). Invariant: once persisted, changing a user's email changes neither who owns a release nor which half of a split batch anyone scores.
 
 ### 1.11 EvaluatorTeam + criterion pairings
 - **`EvaluatorTeam`** (`schema.prisma:290`): `[projectId, name]` (unique).
 - **`EvaluatorTeamMember`** (`schema.prisma:304`): `[teamId, userId]` (unique). A user may be on **at most one team per project** (enforced in team create/update/membership routes).
 - **`EvaluatorTeamDimension`** (`schema.prisma:315`): `[teamId, dimensionId]` (unique). A dimension is assigned to **at most one team per project** (enforced in team create/update).
-- **Member ordering convention:** members are consistently ordered **by email ascending** everywhere it matters (IRR, slot assignment, reconciliation owner). `members[0]` (lowest email) is the **release owner** — the user under whom reconciled rows are written (`getReleaseOwnerUserId`, `team-batch-releases.ts:118`).
+- **Member ordering convention:** members are consistently ordered **by email ascending** everywhere they are loaded (IRR's Scorer A/B columns, the first write of a release's owner and slots). Since 2026-10 that order is **not** the source of truth for ownership: the release owner is `TeamBatchRelease.ownerUserId` and each member's slot is `BatchAssignment.slotIndex` (§1.10). `members[0]` is only the legacy fallback while those columns are null.
 
 ### 1.12 Score (incl. isReconciled)
 - **`Score`** (`schema.prisma:330`): `feedbackItemId`, `userId`, `dimensionId`, `value` (Int), `rationale?`, `isReconciled` (default false), `reconciledFrom?` (comma-joined source score IDs), `notes?`, `startedAt?`, `scoredAt`, `durationSeconds?`.
 - **Unique constraint:** `[feedbackItemId, userId, dimensionId, isReconciled]` (`schema.prisma:348`). **This is load-bearing:** because `isReconciled` is part of the key, a reconciled row (`isReconciled=true`) is a **separate row** from the original (`isReconciled=false`) — reconciliation never overwrites originals (Invariant I-1).
 - Original score: `isReconciled=false`, written by the scoring annotator.
-- Reconciled/adjudicated score: `isReconciled=true`, written under the **release owner's** `userId`, with `reconciledFrom` listing the source IDs and `notes` carrying the rationale.
+- Reconciled/adjudicated score: `isReconciled=true`, written under the **release owner's** `userId` (`TeamBatchRelease.ownerUserId`, resolved by `getReleaseOwnerUserId`; legacy fallback `members[0]` by email while null — §1.10), with `reconciledFrom` listing the source IDs and `notes` carrying the rationale. Because the owner is persisted, a final stays reachable even if a member's email later changes.
 
 ### 1.13 Import
 - **`Import`** (`schema.prisma:359`): `projectId`, `filename`, `itemCount`, `skippedCount`. Rolling-upload provenance; duplicates skipped via the `[projectId, feedbackId]` unique constraint.

@@ -32,6 +32,20 @@ describe('getReleaseItemScope', () => {
     expect(getReleaseItemScope(dbl, 'u1')).toEqual({ mode: 'all' })
     expect(getReleaseItemScope(training, 'u0')).toEqual({ mode: 'all' })
   })
+
+  it('uses the persisted slot over the email index on a split release', () => {
+    // Persisted the other way round from the member order: the stored half wins.
+    const persisted = {
+      ...split,
+      assignments: [
+        { userId: 'u0', slotIndex: 1 },
+        { userId: 'u1', slotIndex: 0 },
+      ],
+    }
+    expect(getReleaseItemScope(persisted, 'u0')).toEqual({ mode: 'slot', slotIndex: 1 })
+    expect(getReleaseItemScope(persisted, 'u1')).toEqual({ mode: 'slot', slotIndex: 0 })
+    expect(getReleaseItemScope(persisted, 'outsider')).toEqual({ mode: 'none' })
+  })
 })
 
 describe('assignment + split helpers', () => {

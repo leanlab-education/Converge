@@ -7,6 +7,7 @@ import { computeReleaseDiscrepancyStats } from '@/lib/reconciliation'
 import {
   getExpectedReleaseUserIds,
   getExpectedScoresPerItemPerDimension,
+  getReleaseOwnerUserId,
   syncBatchAssignmentsForRelease,
 } from '@/lib/team-batch-releases'
 import { assignBatchSlots } from '@/lib/batch-slots'
@@ -190,6 +191,7 @@ export async function GET(
             batchType: batch.type,
             projectId,
             memberUserIds: release.team.members.map((m) => m.user.id),
+            ownerUserId: getReleaseOwnerUserId(release),
             teamDimensionIds: release.team.dimensions.map((d) => d.dimension.id),
           })
           discrepancyCount += stats.discrepancyCount

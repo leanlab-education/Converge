@@ -180,6 +180,152 @@ describe('syncBatchAssignmentsForRelease', () => {
       data: { isAssigned: true },
     })
   })
+
+  // -------------------------------------------------------------------------
+  // Persisted ownership (TeamBatchRelease.ownerUserId, BatchAssignment.slotIndex)
+  // -------------------------------------------------------------------------
+  describe('persisted ownership', () => {
+    const splitBatch = { id: 'b1', isDoubleScored: false, type: 'REGULAR' }
+    const byEmail = [{ userId: 'u0' }, { userId: 'u1' }]
+    const flipped = [{ userId: 'u1' }, { userId: 'u0' }]
+
+    function createdRows() {
+      const arg = prismaMock.batchAssignment.createMany.mock.calls[0][0] as {
+        data: { userId: string; slotIndex: number | null }[]
+      }
+      return arg.data.map((d) => [d.userId, d.slotIndex])
+    }
+
+    it('first sync writes the email-asc rule: owner = members[0], slots = member index', async () => {
+      mockRelease({
+        id: 'r1',
+        scorerUserId: null,
+        ownerUserId: null,
+        batch: splitBatch,
+        team: { members: byEmail, dimensions: [] },
+        assignments: [],
+      })
+
+      await syncBatchAssignmentsForRelease('r1')
+
+      expect(prismaMock.teamBatchRelease.update).toHaveBeenCalledWith({
+        where: { id: 'r1' },
+        data: { ownerUserId: 'u0' },
+      })
+      expect(createdRows()).toEqual([
+        ['u0', 0],
+        ['u1', 1],
+      ])
+      // Owner still on the team → no finals lookup needed.
+      expect(prismaMock.score.count).not.toHaveBeenCalled()
+    })
+
+    it('re-sync after an email edit flipped the order keeps owner and slots', async () => {
+      mockRelease({
+        id: 'r1',
+        scorerUserId: null,
+        ownerUserId: 'u0',
+        batch: splitBatch,
+        team: { members: flipped, dimensions: [] },
+        assignments: [
+          { userId: 'u0', slotIndex: 0 },
+          { userId: 'u1', slotIndex: 1 },
+        ],
+      })
+
+      await syncBatchAssignmentsForRelease('r1')
+
+      expect(prismaMock.teamBatchRelease.update).not.toHaveBeenCalled()
+      // Rows are created in the (new) email order, but each keeps its slot.
+      expect(createdRows()).toEqual([
+        ['u1', 1],
+        ['u0', 0],
+      ])
+    })
+
+    it('writes null slots on a release that does not split', async () => {
+      mockRelease({
+        id: 'r1',
+        scorerUserId: null,
+        ownerUserId: null,
+        batch: { id: 'b1', isDoubleScored: true, type: 'REGULAR' },
+        team: { members: byEmail, dimensions: [] },
+        assignments: [],
+      })
+
+      await syncBatchAssignmentsForRelease('r1')
+
+      expect(createdRows()).toEqual([
+        ['u0', null],
+        ['u1', null],
+      ])
+      expect(prismaMock.teamBatchRelease.update).toHaveBeenCalledWith({
+        where: { id: 'r1' },
+        data: { ownerUserId: 'u0' },
+      })
+    })
+
+    it('a member swapped in before scoring takes the departed member’s slot', async () => {
+      // u1 left, c joined; c sorts before u0 by email. u0 keeps slot 0.
+      mockRelease({
+        id: 'r1',
+        scorerUserId: null,
+        ownerUserId: 'u0',
+        batch: splitBatch,
+        team: { members: [{ userId: 'c' }, { userId: 'u0' }], dimensions: [] },
+        assignments: [
+          { userId: 'u0', slotIndex: 0 },
+          { userId: 'u1', slotIndex: 1 },
+        ],
+      })
+
+      await syncBatchAssignmentsForRelease('r1')
+
+      expect(prismaMock.teamBatchRelease.update).not.toHaveBeenCalled()
+      expect(createdRows()).toEqual([
+        ['c', 1],
+        ['u0', 0],
+      ])
+    })
+
+    it('re-derives the owner when they left the team and hold no finals on the batch', async () => {
+      prismaMock.score.count.mockResolvedValue(0 as never)
+      mockRelease({
+        id: 'r1',
+        scorerUserId: null,
+        ownerUserId: 'gone',
+        batch: splitBatch,
+        team: { members: byEmail, dimensions: [] },
+        assignments: [],
+      })
+
+      await syncBatchAssignmentsForRelease('r1')
+
+      expect(prismaMock.score.count).toHaveBeenCalledWith({
+        where: { feedbackItem: { batchId: 'b1' }, userId: 'gone', isReconciled: true },
+      })
+      expect(prismaMock.teamBatchRelease.update).toHaveBeenCalledWith({
+        where: { id: 'r1' },
+        data: { ownerUserId: 'u0' },
+      })
+    })
+
+    it('keeps a departed owner who still holds finals on the batch', async () => {
+      prismaMock.score.count.mockResolvedValue(12 as never)
+      mockRelease({
+        id: 'r1',
+        scorerUserId: null,
+        ownerUserId: 'gone',
+        batch: { id: 'b1', isDoubleScored: true, type: 'REGULAR' },
+        team: { members: byEmail, dimensions: [] },
+        assignments: [],
+      })
+
+      await syncBatchAssignmentsForRelease('r1')
+
+      expect(prismaMock.teamBatchRelease.update).not.toHaveBeenCalled()
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------

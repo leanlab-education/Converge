@@ -445,10 +445,13 @@ export async function computeReleaseDiscrepancyStats(args: {
   batchId: string
   batchType: string
   projectId: string
-  memberUserIds: string[] // ordered by email asc; [0] is the release owner
+  memberUserIds: string[]
+  // The userId finals are stored under — getReleaseOwnerUserId(release), which
+  // prefers the persisted TeamBatchRelease.ownerUserId. Not memberUserIds[0].
+  ownerUserId: string | null
   teamDimensionIds: string[]
 }): Promise<{ discrepancyCount: number; reconciledCount: number }> {
-  const { batchId, batchType, projectId, memberUserIds, teamDimensionIds } = args
+  const { batchId, batchType, projectId, memberUserIds, ownerUserId, teamDimensionIds } = args
 
   const dimensionIds =
     batchType === 'TRAINING'
@@ -459,8 +462,6 @@ export async function computeReleaseDiscrepancyStats(args: {
           })
         ).map((d) => d.id)
       : teamDimensionIds
-
-  const ownerUserId = memberUserIds[0]
 
   const originalScores = await prisma.score.findMany({
     where: {

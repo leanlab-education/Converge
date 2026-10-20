@@ -14,6 +14,9 @@ import {
 // {id, isDoubleScored, type}.
 export interface BatchAssignmentForStats {
   userId: string
+  // This row's persisted slot (BatchAssignment.slotIndex). Optional so hand-built
+  // fixtures keep working; null/absent falls back to the email-asc rule.
+  slotIndex?: number | null
   teamRelease: {
     id: string
     scorerUserId: string | null
@@ -32,6 +35,7 @@ export interface BatchAssignmentForStats {
 // assignments score the whole rubric).
 export interface BatchAssignmentForScoredStats {
   userId: string
+  slotIndex?: number | null
   teamRelease: {
     id: string
     scorerUserId: string | null
@@ -237,6 +241,8 @@ export function countForAssignment(
         scorerUserId: ba.teamRelease.scorerUserId,
         batch: ba.batch,
         team: { members: ba.teamRelease.team.members },
+        // The persisted slot on this very row wins over the email-asc rule.
+        assignments: [{ userId: ba.userId, slotIndex: ba.slotIndex ?? null }],
       }
     : null
   const slotSplit = releaseContext ? isSlotSplitRelease(releaseContext) : false

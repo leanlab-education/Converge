@@ -46,6 +46,15 @@ describe('countForAssignment (P7 regression: single-scorer must count all items)
     const legacy: BatchAssignmentForStats = { userId: 'u0', batch, teamRelease: null }
     expect(countForAssignment(legacy, 'u0', slotMap)).toBe(50)
   })
+
+  it('counts the slot persisted on the assignment row, not the email index', () => {
+    // u0 is members[0] (email rule says slot 0) but their row says slot 1.
+    const persisted: BatchAssignmentForStats = { ...ba({}, 'u0'), slotIndex: 1 }
+    expect(countForAssignment(persisted, 'u0', slotMap)).toBe(20)
+    // A null slot on the row falls back to the email rule.
+    const unpersisted: BatchAssignmentForStats = { ...ba({}, 'u0'), slotIndex: null }
+    expect(countForAssignment(unpersisted, 'u0', slotMap)).toBe(30)
+  })
 })
 
 describe('buildItemCountMap', () => {

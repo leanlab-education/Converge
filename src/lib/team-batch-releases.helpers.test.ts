@@ -98,6 +98,18 @@ describe('getReleaseOwnerUserId', () => {
     expect(getReleaseOwnerUserId(training)).toBe('u0')
     expect(getReleaseOwnerUserId(single)).toBe('u0')
   })
+
+  it('prefers the persisted owner, so a reordered members array changes nothing', () => {
+    const persisted = { ...dbl, ownerUserId: 'u1' }
+    expect(getReleaseOwnerUserId(persisted)).toBe('u1')
+    // Same release after an email edit flipped the member order.
+    const flipped = { ...persisted, team: { members: [{ userId: 'u1' }, { userId: 'u0' }], ...teamDims } }
+    expect(getReleaseOwnerUserId(flipped)).toBe('u1')
+  })
+
+  it('falls back to members[0] while ownerUserId is null (pre-backfill rows)', () => {
+    expect(getReleaseOwnerUserId({ ...dbl, ownerUserId: null })).toBe('u0')
+  })
 })
 
 describe('getExpectedScoresPerItemPerDimension', () => {
@@ -228,5 +240,32 @@ describe('getReleaseUserSlotIndex', () => {
       isDoubleScored: false,
     }
     expect(getReleaseUserSlotIndex(soloSplit, 'u0')).toBeNull()
+  })
+
+  it('prefers the persisted slot, so a reordered members array changes nothing', () => {
+    const assignments = [
+      { userId: 'u0', slotIndex: 0 },
+      { userId: 'u1', slotIndex: 1 },
+    ]
+    const flipped = {
+      ...split,
+      assignments,
+      team: { members: [{ userId: 'u1' }, { userId: 'u0' }], ...teamDims },
+    }
+    expect(getReleaseUserSlotIndex(flipped, 'u0')).toBe(0)
+    expect(getReleaseUserSlotIndex(flipped, 'u1')).toBe(1)
+  })
+
+  it('falls back to the email index for a row whose slotIndex is still null', () => {
+    const withNulls = { ...split, assignments: [{ userId: 'u0', slotIndex: null }] }
+    expect(getReleaseUserSlotIndex(withNulls, 'u0')).toBe(0)
+    expect(getReleaseUserSlotIndex(withNulls, 'u1')).toBe(1)
+  })
+
+  it('ignores persisted slots on releases that do not split', () => {
+    const assignments = [{ userId: 'u0', slotIndex: 1 }]
+    expect(getReleaseUserSlotIndex({ ...dbl, assignments }, 'u0')).toBeNull()
+    expect(getReleaseUserSlotIndex({ ...training, assignments }, 'u0')).toBeNull()
+    expect(getReleaseUserSlotIndex({ ...single, assignments }, 'u0')).toBeNull()
   })
 })

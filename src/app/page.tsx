@@ -5,6 +5,7 @@ import { EvaluatorDashboard } from '@/components/evaluator-dashboard'
 import { countForAssignment, loadSlotMaps } from '@/lib/evaluator-stats'
 import { getAdminProjectIds } from '@/lib/authorization'
 import { computeReleaseDiscrepancyStats } from '@/lib/reconciliation'
+import { getReleaseOwnerUserId } from '@/lib/team-batch-releases'
 
 export default async function HomePage() {
   const session = await auth()
@@ -119,6 +120,7 @@ export default async function HomePage() {
         batchType: ba.batch.type,
         projectId: ba.batch.project.id,
         memberUserIds: ba.teamRelease.team.members.map((m) => m.userId),
+        ownerUserId: getReleaseOwnerUserId(ba.teamRelease),
         teamDimensionIds: ba.teamRelease.team.dimensions.map((d) => d.dimensionId),
       })
       discrepancyCount = stats.discrepancyCount
